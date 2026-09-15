@@ -419,12 +419,18 @@ BarWidget {
     var cache = root.steamNotInstalledCache
     var ageSec = (cache && typeof cache.generatedAt === "number")
       ? Math.floor(Date.now() / 1000) - cache.generatedAt : -1
-    if (ageSec >= 0 && ageSec < root.steamNotInstalledCacheMaxAgeSec && cache.games) {
-      var games = []
-      for (var appid in cache.games) {
-        var g = cache.games[appid]
-        games.push({
-          appid: appid,
+    // Array, not an appid-keyed object: Steam appids are all-numeric
+    // strings, and JS objects always enumerate integer-like keys in
+    // ascending numeric order regardless of insertion order -- an earlier
+    // object-keyed cache format silently reordered this list to plain
+    // appid order on every cache-hit reload instead of preserving whatever
+    // order the original scan produced. An old on-disk cache in that
+    // shape just reads as stale here (Array.isArray fails) and triggers
+    // one fresh full scan, which writes it back in the new shape.
+    if (ageSec >= 0 && ageSec < root.steamNotInstalledCacheMaxAgeSec && Array.isArray(cache.games)) {
+      var games = cache.games.map(function(g) {
+        return {
+          appid: g.appid,
           name: g.name,
           stateFlags: 0,
           lastPlayed: g.lastPlayed || 0,
@@ -436,13 +442,13 @@ BarWidget {
           achievementsLoaded: !!g.achievementsLoaded,
           achievementsStoreNone: false,
           tags: [],
-          boxArt: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/library_600x900.jpg",
-          boxArtFallback: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/header.jpg"
-        })
-      }
+          boxArt: "https://cdn.akamai.steamstatic.com/steam/apps/" + g.appid + "/library_600x900.jpg",
+          boxArtFallback: "https://cdn.akamai.steamstatic.com/steam/apps/" + g.appid + "/header.jpg"
+        }
+      })
+      root.primeNotInstalledDescriptions(games)
       root.steamNotInstalled = games
       root.steamNotInstalledLoaded = true
-      for (var i = 0; i < games.length; i++) root.queueSteamDescriptionFetch(games[i].appid)
       return
     }
 
@@ -452,10 +458,9 @@ BarWidget {
   }
 
   function cacheSteamNotInstalled(games) {
-    var byAppid = {}
-    for (var i = 0; i < games.length; i++) {
-      var g = games[i]
-      byAppid[g.appid] = {
+    var list = games.map(function(g) {
+      return {
+        appid: g.appid,
         name: g.name,
         lastPlayed: g.lastPlayed,
         playtimeMinutes: g.playtimeMinutes,
@@ -463,8 +468,8 @@ BarWidget {
         achievementsTotal: g.achievementsTotal,
         achievementsLoaded: g.achievementsLoaded
       }
-    }
-    var cache = { generatedAt: Math.floor(Date.now() / 1000), games: byAppid }
+    })
+    var cache = { generatedAt: Math.floor(Date.now() / 1000), games: list }
     root.steamNotInstalledCache = cache
     notInstalledCacheFile.setText(JSON.stringify(cache))
   }
@@ -576,11 +581,11 @@ BarWidget {
       copy.achievementsLoaded = true
       return copy
     })
+    root.primeNotInstalledDescriptions(games)
     root.steamNotInstalled = games
     root.steamNotInstalledLoading = false
     root.steamNotInstalledLoaded = true
     root.cacheSteamNotInstalled(games)
-    for (var g = 0; g < games.length; g++) root.queueSteamDescriptionFetch(games[g].appid)
   }
 
   function setSteamNotInstalledField(appid, field, value) {
@@ -595,20 +600,44 @@ BarWidget {
     root.steamNotInstalled = games
   }
 
-  function queueSteamDescriptionFetch(appid) {
-    var cached = root.descriptionCache[appid]
-    if (cached && typeof cached.fetchedAt === "number") {
-      var ageSec = Math.floor(Date.now() / 1000) - cached.fetchedAt
-      if (ageSec >= 0 && ageSec < root.descriptionCacheMaxAgeSec) {
-        root.setSteamNotInstalledField(appid, "description", cached.description || "")
-        root.setSteamNotInstalledField(appid, "achievementsStoreNone", !!cached.noAchievements)
-        root.setSteamNotInstalledField(appid, "tags", Array.isArray(cached.tags) ? cached.tags : [])
-        root.setSteamNotInstalledField(appid, "descriptionLoaded", true)
-        return
+  // Applies any fresh cached description/tags/achievement-fallback data
+  // directly onto each game object in place (mutating the plain objects in
+  // `games` before it's ever assigned to the reactive `steamNotInstalled`
+  // property) and queues a real fetch only for whatever's left -- called
+  // once per bulk load of the whole list, not once per game.
+  //
+  // The previous approach routed every game through setSteamNotInstalledField
+  // (up to 4 calls each for a cache hit), which does a full array copy AND
+  // reassigns the whole `steamNotInstalled` property every single call. With
+  // a few-hundred-game library and most descriptions already cached from an
+  // earlier session, that meant thousands of full-array-copy reassignments
+  // in one synchronous burst -- confirmed as the cause of a ~20s UI freeze
+  // when switching to this tab: a ListView bound to a plain JS array treats
+  // every reassignment of that array as an entirely new model and
+  // re-realizes every visible delegate (box art included) from scratch each
+  // time, not just once at the end.
+  function primeNotInstalledDescriptions(games) {
+    var nowSec = Math.floor(Date.now() / 1000)
+    var needsFetch = []
+    for (var i = 0; i < games.length; i++) {
+      var g = games[i]
+      var cached = root.descriptionCache[g.appid]
+      if (cached && typeof cached.fetchedAt === "number") {
+        var ageSec = nowSec - cached.fetchedAt
+        if (ageSec >= 0 && ageSec < root.descriptionCacheMaxAgeSec) {
+          g.description = cached.description || ""
+          g.achievementsStoreNone = !!cached.noAchievements
+          g.tags = Array.isArray(cached.tags) ? cached.tags : []
+          g.descriptionLoaded = true
+          continue
+        }
       }
+      needsFetch.push(g.appid)
     }
-    root.steamNotInstalledFetchQueue.push(appid)
-    root.drainSteamNotInstalledFetchQueue()
+    if (needsFetch.length > 0) {
+      root.steamNotInstalledFetchQueue = root.steamNotInstalledFetchQueue.concat(needsFetch)
+      root.drainSteamNotInstalledFetchQueue()
+    }
   }
 
   function drainSteamNotInstalledFetchQueue() {
@@ -957,9 +986,10 @@ BarWidget {
       required property string appid
       // Installed games (a naturally small list) fire immediately, one
       // process per game, same as always. Not-installed games go through
-      // queueSteamDescriptionFetch's concurrency-limited queue instead --
-      // this flag is just which set of setters/bookkeeping to use on
-      // completion, the curl call itself is identical either way.
+      // primeNotInstalledDescriptions/drainSteamNotInstalledFetchQueue's
+      // concurrency-limited queue instead -- this flag is just which set of
+      // setters/bookkeeping to use on completion, the curl call itself is
+      // identical either way.
       property bool forNotInstalled: false
 
       function start() {
@@ -1283,20 +1313,21 @@ BarWidget {
     padding: Style.space(10)
     borderSpec: Border.flat(Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45), Math.max(1, Style.space(2)))
     contentWidth: steamLauncherPopup.fittedContentWidth(Style.space(560))
-    // Capped to exactly 8 game rows tall (plus the fixed header above them):
-    // computed from the header items' own implicitHeight and the row/spacing
-    // constants the delegate below already uses, rather than a flat magic
-    // pixel number, so this stays correct if those constants ever change.
+    // Capped to exactly steamVisibleRows game rows tall (plus the fixed
+    // header above them): computed from the header items' own
+    // implicitHeight and the row/spacing constants the delegate below
+    // already uses, rather than a flat magic pixel number, so this stays
+    // correct if those constants ever change.
     // Each card is now 3 sub-rows (name+status / art+description /
     // achievement bar) instead of 2 -- games without achievement data just
     // leave that sub-row's space empty rather than shrinking the row
-    // per-item (a uniform row height keeps the "8 visible rows" math simple
+    // per-item (a uniform row height keeps the "N visible rows" math simple
     // and correct without per-row variable sizing).
     readonly property int steamRowHeight: Style.space(140)
     // Both tabs use the same SteamGameCard row height now that not-installed
     // entries render with full detail too (box art/description/tags/
     // achievements), so a single cap covers either tab.
-    readonly property int steamVisibleRows: 8
+    readonly property int steamVisibleRows: 5
     readonly property int steamHeaderHeight: steamHeaderRow.implicitHeight + steamLauncherColumn.spacing
       + steamTabsRow.implicitHeight + steamLauncherColumn.spacing + steamSearchField.implicitHeight
     readonly property int steamListCapHeight: steamHeaderHeight + steamLauncherColumn.spacing
@@ -1613,6 +1644,7 @@ BarWidget {
             game: modelData
             actionTooltip: "Install"
             hoverGlyph: "⬇"
+            showActionButton: true
             onActivated: root.installSteamApp(modelData.appid)
           }
         }
@@ -1633,6 +1665,14 @@ BarWidget {
     required property var game
     property string actionTooltip: "Launch"
     property string hoverGlyph: "▶"
+    // Installed games keep the plain click-anywhere-to-launch card (matches
+    // how Steam's own library already works, no button needed). Not-
+    // installed games get an explicit, always-visible "Install" button too
+    // -- restores what a pre-card-parity version of this list had (a real
+    // Button, not just a hover-only glyph) after Alan reported it missing;
+    // the hover glyph alone wasn't a discoverable enough affordance for a
+    // less familiar action like installing an owned-but-uninstalled game.
+    property bool showActionButton: false
     signal activated()
 
     width: steamLauncherColumn.width
@@ -1658,7 +1698,7 @@ BarWidget {
       // Row 1: name (left), status/recency/playtime (right).
       Item {
         width: parent.width
-        implicitHeight: nameText.implicitHeight
+        implicitHeight: Math.max(nameText.implicitHeight, installButton.visible ? installButton.implicitHeight : 0)
 
         Text {
           id: nameText
@@ -1677,7 +1717,8 @@ BarWidget {
         Text {
           id: statusText
           textFormat: Text.PlainText
-          anchors.right: parent.right
+          anchors.right: installButton.visible ? installButton.left : parent.right
+          anchors.rightMargin: installButton.visible ? Style.space(8) : 0
           text: cardRoot.isRunning ? "▶ Playing now"
             : cardRoot.isUpdating ? "⬇ Updating…"
             : root.relativeLastPlayed(cardRoot.game.lastPlayed) + root.playtimeSuffix(cardRoot.game.playtimeMinutes)
@@ -1685,6 +1726,23 @@ BarWidget {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           font.bold: cardRoot.isRunning || cardRoot.isUpdating
+        }
+
+        // z above cardMouse (declared later, below, but at the default z:0)
+        // so its own click is what actually fires, not swallowed by the
+        // whole-card MouseArea sitting on top of it.
+        Button {
+          id: installButton
+          visible: cardRoot.showActionButton
+          z: 1
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: cardRoot.actionTooltip
+          foreground: root.foreground
+          horizontalPadding: 8
+          verticalPadding: 3
+          fontSize: Style.font.caption
+          onClicked: cardRoot.activated()
         }
       }
 
@@ -1808,7 +1866,7 @@ BarWidget {
           id: trophyIcon
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
-          text: ""
+          text: ""
           color: Qt.darker(root.foreground, 1.4)
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
