@@ -813,14 +813,23 @@ BarWidget {
     }
   }
 
-  PopupCard {
+  // KeyboardPanel, not PopupCard: PopupCard is built on PopupWindow (an
+  // xdg-popup) which only gets real Wayland keyboard focus routed to it in
+  // limited cases -- buttons work fine (mouse clicks don't need keyboard
+  // focus), but a TextField inside one silently accepts no typed input at
+  // all, confirmed the hard way building the Cameras plugin. KeyboardPanel
+  // explicitly manages WlrLayershell.keyboardFocus and has the same API
+  // (anchorItem/bar/owner/open/contentWidth/Height/fittedContentWidth/Height
+  // all match) -- a drop-in swap plus a focusTarget.
+  KeyboardPanel {
     id: steamLauncherPopup
     anchorItem: root.steamPopupAnchor || root
     owner: root
     bar: root.bar
     open: root.steamPopupOpen
+    focusTarget: steamSearchField
     padding: Style.space(10)
-    borderColor: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
+    borderSpec: Border.flat(Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45), Math.max(1, Style.space(2)))
     contentWidth: steamLauncherPopup.fittedContentWidth(Style.space(560))
     // Capped to exactly 8 game rows tall (plus the fixed header above them):
     // computed from the header items' own implicitHeight and the row/spacing
