@@ -5,9 +5,10 @@ has achievement data cached, by reading Steam's own local binary stat cache
 achievement definitions, UserGameStats_<accountid>_<appid>.bin for this
 user's unlock state). Undocumented binary KeyValues format, decoded below.
 
-A game with no UserGameStats_* file yet (Steam only writes one after you've
-actually viewed that game's achievements or played it) or with zero
-ACHIEVEMENTS-type stats is simply omitted -- not printed as 0/0.
+A game with no UserGameStatsSchema_* file at all (Steam hasn't fetched it
+yet) is omitted entirely -- unknown, not "zero". A game whose schema *is*
+known but genuinely has no ACHIEVEMENTS-type stats is printed as "0\t0" --
+a confirmed fact, distinguishable by the caller from "no line at all".
 """
 import glob
 import os
@@ -124,9 +125,6 @@ def main():
     stats_dir = os.path.expanduser("~/.local/share/Steam/appcache/stats")
     for schema_path in glob.glob(os.path.join(stats_dir, "UserGameStatsSchema_*.bin")):
         appid = os.path.basename(schema_path)[len("UserGameStatsSchema_"):-len(".bin")]
-        user_path = os.path.join(stats_dir, f"UserGameStats_{accountid}_{appid}.bin")
-        if not os.path.isfile(user_path):
-            continue  # Steam hasn't fetched this user's stats for this game yet.
 
         try:
             schema_root = parse_binary_vdf(schema_path)
@@ -136,7 +134,17 @@ def main():
         group_bit_ids = achievement_group_bit_ids(schema_root)
         total = sum(len(ids) for ids in group_bit_ids.values())
         if total <= 0:
+            # The schema itself is known (Steam has fetched it) and
+            # genuinely carries no ACHIEVEMENTS-type stats -- a real,
+            # knowable fact, distinct from "no schema file at all" (never
+            # fetched, printed as nothing below) which the caller should
+            # treat as "unknown" rather than "confirmed none".
+            print(f"{appid}\t0\t0")
             continue
+
+        user_path = os.path.join(stats_dir, f"UserGameStats_{accountid}_{appid}.bin")
+        if not os.path.isfile(user_path):
+            continue  # Steam hasn't fetched this user's stats for this game yet.
 
         try:
             user_stats = parse_binary_vdf(user_path)

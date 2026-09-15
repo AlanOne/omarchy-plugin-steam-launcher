@@ -351,9 +351,12 @@ BarWidget {
   // network) rather than one process per game -- unlike descriptions, this
   // has no reason to be cached across popup opens: it's already as cheap as
   // the games-list/last-played rescans that already happen on every open.
-  // Games with no line in the output (no local stats file yet, or zero
-  // ACHIEVEMENTS-type stats) are left with achievementsLoaded=false, which
-  // the popup reads as "don't show a progress bar for this one".
+  // Games with no line in the output at all (no local stats file yet --
+  // Steam hasn't fetched them) are left with achievementsLoaded=false,
+  // which the popup reads as "no achievement row at all -- unknown". A
+  // game the script *did* report with total=0 (confirmed no achievements)
+  // still gets achievementsLoaded=true, distinguishing "known: none" from
+  // "unknown" -- the popup shows "No achievements" for the former.
   function onSteamAchievementsListed(raw) {
     // One reassignment of root.steamGames for the whole batch, not one per
     // field per game via setSteamGameField -- steamGames is a plain JS
@@ -371,7 +374,7 @@ BarWidget {
       var appid = parts[0].trim()
       var unlocked = parseInt(parts[1], 10)
       var total = parseInt(parts[2], 10)
-      if (!appid || isNaN(unlocked) || isNaN(total) || total <= 0) continue
+      if (!appid || isNaN(unlocked) || isNaN(total) || total < 0) continue
       byAppid[appid] = { unlocked: unlocked, total: total }
     }
     if (Object.keys(byAppid).length === 0) return
@@ -931,7 +934,7 @@ BarWidget {
             spacing: Style.space(6)
 
             Button {
-              iconText: "📚"
+              iconText: ""
               text: "Library"
               foreground: root.foreground
               horizontalPadding: 8
@@ -942,7 +945,7 @@ BarWidget {
             }
 
             Button {
-              iconText: "🖥️"
+              iconText: ""
               text: "Big Picture"
               foreground: root.foreground
               horizontalPadding: 8
@@ -953,7 +956,7 @@ BarWidget {
             }
 
             Button {
-              iconText: "🥽"
+              iconText: ""
               text: "VR"
               foreground: root.foreground
               horizontalPadding: 8
@@ -1180,16 +1183,18 @@ BarWidget {
               // Row 3: achievement progress -- trophy left, bar expanded to
               // fill the row, numbers on the right. Steam's own local
               // achievement-stat cache, not the Web API -- see
-              // scripts/steam-achievements.py. Omitted (not a 0/0 bar) for a
-              // game Steam hasn't fetched stats for yet, or one with no
-              // ACHIEVEMENTS-type stats at all.
+              // scripts/steam-achievements.py. Omitted entirely for a game
+              // Steam hasn't fetched stats for yet (unknown); a game
+              // confirmed to have no ACHIEVEMENTS-type stats at all shows
+              // "No achievements" instead of a 0/0 bar.
               Item {
                 id: achievementRow
                 visible: gameRow.modelData.achievementsLoaded
                 width: parent.width
                 implicitHeight: Style.space(20)
 
-                readonly property real fraction: gameRow.modelData.achievementsTotal > 0
+                readonly property bool hasAchievements: gameRow.modelData.achievementsTotal > 0
+                readonly property real fraction: hasAchievements
                   ? gameRow.modelData.achievementsUnlocked / gameRow.modelData.achievementsTotal
                   : 0
 
@@ -1197,12 +1202,29 @@ BarWidget {
                   id: trophyIcon
                   anchors.left: parent.left
                   anchors.verticalCenter: parent.verticalCenter
-                  text: "🏆"
+                  text: ""
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
                 }
 
                 Text {
+                  id: noAchievementsLabel
+                  visible: !achievementRow.hasAchievements
+                  textFormat: Text.PlainText
+                  anchors.left: trophyIcon.right
+                  anchors.leftMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "No achievements"
+                  color: Qt.darker(root.foreground, 1.5)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.italic: true
+                }
+
+                Text {
                   id: achievementLabel
+                  visible: achievementRow.hasAchievements
                   textFormat: Text.PlainText
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
@@ -1215,6 +1237,7 @@ BarWidget {
 
                 Rectangle {
                   id: achievementTrack
+                  visible: achievementRow.hasAchievements
                   anchors.left: trophyIcon.right
                   anchors.leftMargin: Style.space(8)
                   anchors.right: achievementLabel.left
@@ -1291,11 +1314,15 @@ BarWidget {
     }
 
     // Steam genuinely not installed: no live SNI icon, no local asset file
-    // to fall back to either. A plain emoji glyph beats rendering nothing.
+    // to fall back to either. A plain icon-font glyph beats rendering
+    // nothing, and (unlike a color emoji) respects `color` so it blends in
+    // with the theme the same way the recolored real icon does.
     Text {
       anchors.centerIn: parent
       visible: !trayIconRoot.hasImage
-      text: "🎮"
+      text: ""
+      color: root.foreground
+      font.family: root.fontFamily
       font.pixelSize: parent.height * 0.85
     }
   }
