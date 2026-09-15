@@ -1,6 +1,7 @@
 #!/bin/bash
-# Lists locally installed Steam apps as "appid<TAB>name<TAB>stateFlags" lines,
-# one per app. Filtering out compat tools / non-games is left to the caller.
+# Lists locally installed Steam apps as
+# "appid<TAB>name<TAB>stateFlags<TAB>sizeOnDisk" lines, one per app. Filtering
+# out compat tools / non-games is left to the caller.
 #
 # stateFlags is Steam's own bitmask for the app's current install state
 # (well-established community-documented values, consistent with this
@@ -20,5 +21,6 @@ for f in "$HOME"/.local/share/Steam/steamapps/appmanifest_*.acf "$HOME"/.steam/s
   seen[$appid]=1
   name=$(grep -m1 '"name"' "$f" | sed -E 's/^[[:space:]]*"name"[[:space:]]+"(.*)"[[:space:]]*$/\1/')
   stateFlags=$(grep -m1 '"StateFlags"' "$f" | grep -oE '[0-9]+' | head -1)
-  [[ -n "$name" ]] && printf '%s\t%s\t%s\n' "$appid" "$name" "${stateFlags:-0}"
+  sizeOnDisk=$(grep -m1 '"SizeOnDisk"' "$f" | grep -oE '[0-9]+' | head -1)
+  [[ -n "$name" ]] && printf '%s\t%s\t%s\t%s\n' "$appid" "$name" "${stateFlags:-0}" "${sizeOnDisk:-0}"
 done

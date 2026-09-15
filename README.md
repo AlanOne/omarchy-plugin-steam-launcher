@@ -50,6 +50,12 @@ This plugin gives left-click something worth doing instead: a real launcher.
 - The Steam icon itself, and the right-click menu, come from the same generic system-tray
   protocol (StatusNotifierItem/DBusMenu) every tray icon uses — this plugin just recognizes
   Steam's specifically (by id/title) and gives it its own dedicated left-click behavior.
+- **Disk usage** ("2.6 GB total") sums each installed game's `SizeOnDisk` field, already
+  present in the same `appmanifest_<appid>.acf` files used for the games list — always the
+  full install list's total, regardless of an active search.
+- **Search** filters the list by name as you type, entirely client-side over the
+  already-loaded games (no rescan, no process spawn). The "Installed games (N)" count
+  reflects the filtered results while a search is active.
 
 **Two Quickshell/Steam quirks this plugin works around**, worth knowing if you're reading
 the source:
@@ -84,11 +90,11 @@ omarchy plugin add https://github.com/AlanOne/omarchy-plugin-steam-launcher.git 
 
 - **Left-click** the Steam icon: opens the quick-launcher. Click any game to launch it.
   **Library**, **Big Picture**, and **VR** buttons sit next to the title, with an
-  "Installed games (N)" count below them. The list shows up to 8 games before scrolling;
-  hovering a game shows a small play button on its box art as a launch affordance (the whole
-  row is clickable either way). A game currently running shows "▶ Playing now" instead of its
-  last-played time and sorts above everything else; one actively downloading/updating shows
-  "⬇ Updating…".
+  "Installed games (N)" count and total disk usage below them, and a search box below that
+  to filter by name. The list shows up to 8 games before scrolling; hovering a game shows a
+  small play button on its box art as a launch affordance (the whole row is clickable either
+  way). A game currently running shows "▶ Playing now" instead of its last-played time and
+  sorts above everything else; one actively downloading/updating shows "⬇ Updating…".
 - **Right-click**: Steam's own native context menu (Store, Library, Community, Friends,
   Settings, Big Picture, SteamVR, Exit Steam) — submenus (e.g. the "recently played" list
   some Steam versions show here) work too, rendered inline rather than as a native platform

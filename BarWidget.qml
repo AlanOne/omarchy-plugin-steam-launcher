@@ -60,6 +60,26 @@ BarWidget {
   property bool steamGamesLoading: false
   property bool steamGamesLoaded: false
   property var steamGamesPending: null
+
+  // Search box state. Filtering is a pure client-side name match over the
+  // already-loaded list -- no rescan, no process spawn -- so it can just be
+  // a computed property re-evaluated on every keystroke.
+  property string steamSearchQuery: ""
+  readonly property var filteredSteamGames: {
+    var q = steamSearchQuery.trim().toLowerCase()
+    if (!q) return steamGames
+    return steamGames.filter(function(g) { return g.name.toLowerCase().indexOf(q) !== -1 })
+  }
+
+  // Disk usage always reflects the full install list, not the filtered one
+  // -- "how much disk am I using" shouldn't change just because a search is
+  // active.
+  readonly property real totalDiskBytes: {
+    var sum = 0
+    for (var i = 0; i < steamGames.length; i++) sum += (steamGames[i].sizeOnDisk || 0)
+    return sum
+  }
+
   // Persisted across shell restarts (the shell process itself restarts far
   // more often than a game's store blurb changes -- suspend/resume can
   // SIGKILL and relaunch it, `omarchy restart shell`, plugin hot-reloads,
@@ -193,11 +213,14 @@ BarWidget {
       var name = parts[1].trim()
       var stateFlags = parts.length > 2 ? parseInt(parts[2], 10) : 0
       if (isNaN(stateFlags)) stateFlags = 0
+      var sizeOnDisk = parts.length > 3 ? parseInt(parts[3], 10) : 0
+      if (isNaN(sizeOnDisk)) sizeOnDisk = 0
       if (!appid || !name || looksLikeSteamTool(name)) continue
       games.push({
         appid: appid,
         name: name,
         stateFlags: stateFlags,
+        sizeOnDisk: sizeOnDisk,
         lastPlayed: 0,
         playtimeMinutes: 0,
         description: "",
@@ -236,6 +259,17 @@ BarWidget {
     if (m < 30) return ""
     var hrs = m / 60
     return " · " + (hrs < 10 ? hrs.toFixed(1) : Math.round(hrs)) + " hrs"
+  }
+
+  // Matches the convention already used elsewhere in the Omarchy shell
+  // (network panel's Model.js formatBytes) rather than inventing a new one.
+  function formatBytes(bytes) {
+    var n = Number(bytes)
+    if (!isFinite(n) || n < 0) n = 0
+    if (n < 1024) return Math.round(n) + " B"
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB"
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB"
+    return (n / (1024 * 1024 * 1024)).toFixed(1) + " GB"
   }
 
   function onSteamLastPlayedListed(raw) {
@@ -799,7 +833,8 @@ BarWidget {
     // and correct without per-row variable sizing).
     readonly property int steamRowHeight: Style.space(120)
     readonly property int steamVisibleRows: 8
-    readonly property int steamHeaderHeight: steamHeaderRow.implicitHeight + steamLauncherColumn.spacing + steamSectionLabel.implicitHeight
+    readonly property int steamHeaderHeight: steamHeaderRow.implicitHeight + steamLauncherColumn.spacing
+      + steamLabelRow.implicitHeight + steamLauncherColumn.spacing + steamSearchField.implicitHeight
     readonly property int steamListCapHeight: steamHeaderHeight + steamLauncherColumn.spacing
       + steamVisibleRows * steamRowHeight + (steamVisibleRows - 1) * steamLauncherColumn.spacing
     contentHeight: steamLauncherPopup.fittedContentHeight(steamLauncherColumn.implicitHeight, steamListCapHeight)
@@ -881,13 +916,47 @@ BarWidget {
           }
         }
 
-        Text {
-          id: steamSectionLabel
-          text: "Installed games (" + root.steamGames.length + ")"
-          color: Qt.darker(root.foreground, 1.3)
+        Item {
+          id: steamLabelRow
+          width: parent.width
+          implicitHeight: Math.max(steamSectionLabel.implicitHeight, steamDiskUsageText.implicitHeight)
+
+          // Shows the filtered count while a search is active -- the total
+          // count would be misleading sitting right above a shorter list.
+          Text {
+            id: steamSectionLabel
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Installed games (" + root.filteredSteamGames.length + ")"
+            color: Qt.darker(root.foreground, 1.3)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
+          // Disk usage always reflects the full list regardless of search --
+          // see totalDiskBytes's own comment.
+          Text {
+            id: steamDiskUsageText
+            visible: root.steamGames.length > 0
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.formatBytes(root.totalDiskBytes) + " total"
+            color: Qt.darker(root.foreground, 1.5)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        TextField {
+          id: steamSearchField
+          width: parent.width
+          verticalPadding: 4
+          placeholderText: "Search games…"
+          foreground: root.foreground
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: true
+          text: root.steamSearchQuery
+          onTextChanged: root.steamSearchQuery = text
         }
 
         Text {
@@ -908,8 +977,18 @@ BarWidget {
           font.italic: true
         }
 
+        Text {
+          visible: root.steamGamesLoaded && root.steamGames.length > 0
+            && root.filteredSteamGames.length === 0 && root.steamSearchQuery.trim() !== ""
+          text: "No games match \"" + root.steamSearchQuery.trim() + "\"."
+          color: Qt.darker(root.foreground, 1.5)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.italic: true
+        }
+
         Repeater {
-          model: root.steamGames
+          model: root.filteredSteamGames
 
           delegate: Item {
             id: gameRow
