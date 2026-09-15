@@ -130,6 +130,10 @@ omarchy plugin remove io.github.alanone.steam-launcher
   whatever was loaded by the last background scan, not a live view — reopening it a few
   minutes later, or after actually using the game in question, should pick it up (see "How it
   works" above for the actual cadence).
+- **A newly bought game doesn't show up in the "Not installed" tab right away, or a game you
+  just installed through this plugin still shows there too**: that list is cached to disk for
+  up to 24 hours (parsing `appinfo.vdf` for a large library is real work worth skipping on
+  every popup open) — it'll pick up the change once that cache naturally expires.
 - **Bar icon doesn't theme correctly after an update**: run
   `omarchy-shell shell rescanPlugins`; if that doesn't pick it up, `omarchy restart shell` will.
 
