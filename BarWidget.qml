@@ -198,6 +198,9 @@ BarWidget {
         lastPlayed: 0,
         description: "",
         descriptionLoaded: false,
+        achievementsUnlocked: 0,
+        achievementsTotal: 0,
+        achievementsLoaded: false,
         boxArt: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/library_600x900.jpg",
         boxArtFallback: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/header.jpg"
       })
@@ -239,6 +242,53 @@ BarWidget {
     root.steamGamesLoading = false
     root.steamGamesLoaded = true
     for (var g = 0; g < games.length; g++) fetchSteamDescription(games[g].appid)
+    loadSteamAchievements()
+  }
+
+  function loadSteamAchievements() {
+    steamAchievementsProc.command = ["python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.alanone.steam-launcher/scripts/steam-achievements.py"]
+    steamAchievementsProc.running = true
+  }
+
+  // One combined local read (Steam's own binary achievement-stat cache, no
+  // network) rather than one process per game -- unlike descriptions, this
+  // has no reason to be cached across popup opens: it's already as cheap as
+  // the games-list/last-played rescans that already happen on every open.
+  // Games with no line in the output (no local stats file yet, or zero
+  // ACHIEVEMENTS-type stats) are left with achievementsLoaded=false, which
+  // the popup reads as "don't show a progress bar for this one".
+  function onSteamAchievementsListed(raw) {
+    // One reassignment of root.steamGames for the whole batch, not one per
+    // field per game via setSteamGameField -- steamGames is a plain JS
+    // array, so each reassignment recreates every Repeater delegate (all
+    // box art Images included). Looping setSteamGameField 3x per game here
+    // caused dozens of full re-renders in a row, visible as the same box
+    // art URL being re-fetched over and over in the log.
+    var byAppid = {}
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i]
+      if (!line) continue
+      var parts = line.split("\t")
+      if (parts.length !== 3) continue
+      var appid = parts[0].trim()
+      var unlocked = parseInt(parts[1], 10)
+      var total = parseInt(parts[2], 10)
+      if (!appid || isNaN(unlocked) || isNaN(total) || total <= 0) continue
+      byAppid[appid] = { unlocked: unlocked, total: total }
+    }
+    if (Object.keys(byAppid).length === 0) return
+
+    var games = root.steamGames.map(function(g) {
+      var entry = byAppid[g.appid]
+      if (!entry) return g
+      var copy = Object.assign({}, g)
+      copy.achievementsUnlocked = entry.unlocked
+      copy.achievementsTotal = entry.total
+      copy.achievementsLoaded = true
+      return copy
+    })
+    root.steamGames = games
   }
 
   function relativeLastPlayed(epoch) {
@@ -392,6 +442,14 @@ BarWidget {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.onSteamLastPlayedListed(text)
+    }
+  }
+
+  Process {
+    id: steamAchievementsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.onSteamAchievementsListed(text)
     }
   }
 
@@ -700,7 +758,12 @@ BarWidget {
     // computed from the header items' own implicitHeight and the row/spacing
     // constants the delegate below already uses, rather than a flat magic
     // pixel number, so this stays correct if those constants ever change.
-    readonly property int steamRowHeight: Style.space(72)
+    // Bumped from 72 to fit an achievement progress bar + label under the
+    // description on games that have one; games without achievement data
+    // just leave that space empty rather than shrinking the row per-item
+    // (a uniform row height keeps the "8 visible rows" math simple and
+    // correct without per-row variable sizing).
+    readonly property int steamRowHeight: Style.space(94)
     readonly property int steamVisibleRows: 8
     readonly property int steamHeaderHeight: steamTitleText.implicitHeight + steamLauncherColumn.spacing + steamButtonsRow.implicitHeight
     readonly property int steamListCapHeight: steamHeaderHeight + steamLauncherColumn.spacing
@@ -729,7 +792,7 @@ BarWidget {
 
         Text {
           id: steamTitleText
-          text: "Steam"
+          text: "Steam Launcher"
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -799,7 +862,7 @@ BarWidget {
             id: gameRow
             required property var modelData
             width: steamLauncherColumn.width
-            implicitHeight: Style.space(72)
+            implicitHeight: steamLauncherPopup.steamRowHeight
 
             Rectangle {
               anchors.fill: parent
@@ -904,6 +967,52 @@ BarWidget {
                 wrapMode: Text.WordWrap
                 maximumLineCount: 3
                 elide: Text.ElideRight
+              }
+
+              // Steam's own local achievement-stat cache, not the Web API --
+              // see scripts/steam-achievements.py. Omitted (not a 0/0 bar)
+              // for a game Steam hasn't fetched stats for yet, or one with
+              // no ACHIEVEMENTS-type stats at all.
+              Item {
+                id: achievementRow
+                visible: gameRow.modelData.achievementsLoaded
+                width: parent.width
+                implicitHeight: Style.space(14)
+
+                readonly property real fraction: gameRow.modelData.achievementsTotal > 0
+                  ? gameRow.modelData.achievementsUnlocked / gameRow.modelData.achievementsTotal
+                  : 0
+
+                Rectangle {
+                  id: achievementTrack
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(90)
+                  height: Style.space(6)
+                  radius: height / 2
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+
+                  Rectangle {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    radius: parent.radius
+                    color: root.foreground
+                    width: Math.max(height, achievementTrack.width * achievementRow.fraction)
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.left: achievementTrack.right
+                  anchors.leftMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: gameRow.modelData.achievementsUnlocked + "/" + gameRow.modelData.achievementsTotal
+                    + " — " + Math.round(achievementRow.fraction * 100) + "%"
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
               }
             }
 

@@ -1,1 +1,3 @@
 cache/steam-descriptions.json
+__pycache__/
+*.pyc

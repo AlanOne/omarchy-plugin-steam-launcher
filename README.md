@@ -1,9 +1,9 @@
 # Steam Launcher
 
 A Steam icon for the Omarchy bar that only shows up while Steam is running. Left-click it
-for a quick-launcher popup listing your installed games — box art, a short blurb, sorted by
-last-played — and launch one with a single click. Right-click still gives you Steam's own
-native context menu (Store, Library, Friends, Settings, Exit) as a fallback.
+for a quick-launcher popup listing your installed games — box art, a short blurb, achievement
+progress, sorted by last-played — and launch one with a single click. Right-click still gives
+you Steam's own native context menu (Store, Library, Friends, Settings, Exit) as a fallback.
 
 ![Steam Launcher popup](preview.png)
 
@@ -30,6 +30,14 @@ This plugin gives left-click something worth doing instead: a real launcher.
 - **Descriptions** come from Steam's free, keyless `store.steampowered.com/api/appdetails`
   endpoint, one request per game, cached locally for 30 days (`cache/steam-descriptions.json`)
   so it doesn't re-fetch on every popup open or shell restart.
+- **Achievement progress** ("5/10 — 50%" + a bar) is read from Steam's own local binary
+  stat cache (`~/.local/share/Steam/appcache/stats/UserGameStats*.bin`) — an undocumented but
+  fully local, keyless format, decoded by a small dependency-free parser in
+  [`scripts/steam-achievements.py`](scripts/steam-achievements.py). No Steam Web API key or
+  public-profile requirement, unlike the official achievements API. A game only shows a bar
+  once Steam has actually cached stats for it locally (typically after you've viewed its
+  achievements page or played it at least once) — nothing shows for a game with no local
+  stats yet, or one with no achievements at all, rather than a misleading 0/0.
 - **Launching** a game shells out to `xdg-open steam://rungameid/<appid>` — the same URI
   scheme Steam's own browser integration uses, so it just asks your already-running Steam
   client to launch it.
@@ -57,8 +65,8 @@ the source:
   standard Steam-for-Linux install — this is how Steam registers itself with `xdg-open`).
 - **`curl`** — used for the description fetch. Present by default on virtually every Linux
   install, including Omarchy.
-- **`python3`** — used only for the local last-played VDF parse. Present by default on
-  Omarchy.
+- **`python3`** — used for the local last-played and achievement VDF parsing. Present by
+  default on Omarchy.
 
 ## Install
 
@@ -96,13 +104,14 @@ omarchy plugin remove io.github.alanone.steam-launcher
 ## Security
 
 - Runs three external processes: `xdg-open` (to hand `steam://` URIs to Steam), `curl` (to
-  fetch a game's public store description), and `python3` (to parse your local last-played
-  file). Nothing else.
+  fetch a game's public store description), and `python3` (to parse local Steam files — last
+  played time and achievement stats). Nothing else.
 - The only network calls are to Steam's own CDN (box art) and store API (descriptions) —
   both public, keyless, read-only endpoints. No credentials are used or stored anywhere.
-- Reads two local files that are entirely yours already (`appmanifest_*.acf`,
-  `localconfig.vdf`) — nothing here is sent anywhere, they're only used to build the local
-  games list and sort order.
+- Reads local files that are entirely yours already (`appmanifest_*.acf`, `localconfig.vdf`,
+  and the local achievement stat cache under `appcache/stats/`) — nothing here is sent
+  anywhere, they're only used to build the local games list, sort order, and achievement
+  progress.
 
 ## Troubleshooting
 
@@ -115,6 +124,10 @@ omarchy plugin remove io.github.alanone.steam-launcher
 - **Box art missing for one game**: not every game has a `library_600x900.jpg` on Steam's
   CDN — this plugin falls back to `header.jpg` automatically; if neither exists for a given
   game, the slot stays blank rather than showing a broken-image icon.
+- **No achievement bar for a game that has achievements**: Steam only writes its local stat
+  cache for a game after you've opened that game's achievements page or played it at least
+  once in the client — a freshly installed, never-touched game won't have one yet. Play it
+  or check its achievements in Steam once, then reopen the popup.
 - **Bar icon doesn't theme correctly after an update**: run
   `omarchy-shell shell rescanPlugins`; if that doesn't pick up a change, a full
   `omarchy restart shell` will.
