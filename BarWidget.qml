@@ -512,11 +512,6 @@ BarWidget {
     return name.slice(-9) === "-symbolic" || name.slice(-5) === "_mono"
   }
 
-  function trayTooltip(item) {
-    if (!item) return ""
-    return item.tooltipTitle || item.title || item.id || ""
-  }
-
   FileView {
     id: descriptionCacheFile
     path: Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.alanone.steam-launcher/cache/steam-descriptions.json"
@@ -900,11 +895,27 @@ BarWidget {
         Item {
           id: steamHeaderRow
           width: parent.width
-          implicitHeight: Math.max(steamTitleText.implicitHeight, steamButtonsRow.implicitHeight)
+          implicitHeight: Math.max(steamTitleIcon.height, steamTitleText.implicitHeight, steamButtonsRow.implicitHeight)
+
+          // Same TrayIcon used for the bar icon itself, so the title picks
+          // up the exact same live-icon/fallback-file/emoji logic for free
+          // (Steam's real icon while running, the same file read directly
+          // while closed, the 🎮 placeholder when Steam isn't installed).
+          TrayIcon {
+            id: steamTitleIcon
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.font.body
+            height: Style.font.body
+            icon: root.steamItem ? root.steamItem.icon : null
+            fallbackFile: (!root.steamItem && root.steamInstalled)
+              ? (Quickshell.env("HOME") + "/.local/share/Steam/public/steam_tray_mono.png") : ""
+          }
 
           Text {
             id: steamTitleText
-            anchors.left: parent.left
+            anchors.left: steamTitleIcon.right
+            anchors.leftMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             text: "Steam Launcher"
             color: root.foreground
@@ -920,7 +931,7 @@ BarWidget {
             spacing: Style.space(6)
 
             Button {
-              iconText: ""
+              iconText: "📚"
               text: "Library"
               foreground: root.foreground
               horizontalPadding: 8
@@ -931,7 +942,7 @@ BarWidget {
             }
 
             Button {
-              iconText: ""
+              iconText: "🖥️"
               text: "Big Picture"
               foreground: root.foreground
               horizontalPadding: 8
@@ -1311,7 +1322,7 @@ BarWidget {
     acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
     hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
-    onEntered: if (root.bar) root.bar.showTooltip(root, root.trayTooltip(root.steamItem) || "Steam Launcher")
+    onEntered: if (root.bar) root.bar.showTooltip(root, "Steam Launcher")
     onExited: if (root.bar) root.bar.hideTooltip(root)
     onPressed: function(mouse) {
       // No-op when Steam isn't running: openTrayMenu already guards on a
