@@ -187,15 +187,19 @@ BarWidget {
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
       if (!line) continue
-      var tab = line.indexOf("\t")
-      if (tab === -1) continue
-      var appid = line.slice(0, tab).trim()
-      var name = line.slice(tab + 1).trim()
+      var parts = line.split("\t")
+      if (parts.length < 2) continue
+      var appid = parts[0].trim()
+      var name = parts[1].trim()
+      var stateFlags = parts.length > 2 ? parseInt(parts[2], 10) : 0
+      if (isNaN(stateFlags)) stateFlags = 0
       if (!appid || !name || looksLikeSteamTool(name)) continue
       games.push({
         appid: appid,
         name: name,
+        stateFlags: stateFlags,
         lastPlayed: 0,
+        playtimeMinutes: 0,
         description: "",
         descriptionLoaded: false,
         achievementsUnlocked: 0,
@@ -212,27 +216,57 @@ BarWidget {
     steamLastPlayedProc.running = true
   }
 
+  // Steam's own AppRunning/updating bits (well-established community-
+  // documented values -- this machine's idle baseline of "4" == just
+  // FullyInstalled, nothing else set, matches expectations). Read fresh
+  // every rescan, so no separate polling loop is needed for either state.
+  readonly property int steamStateFlagRunning: 64
+  readonly property int steamStateFlagsUpdating: 256 | 1024 | 131072 | 262144 | 524288
+
+  function isGameRunning(stateFlags) {
+    return (Number(stateFlags) & root.steamStateFlagRunning) !== 0
+  }
+
+  function isGameUpdating(stateFlags) {
+    return (Number(stateFlags) & root.steamStateFlagsUpdating) !== 0
+  }
+
+  function playtimeSuffix(minutes) {
+    var m = Number(minutes) || 0
+    if (m < 30) return ""
+    var hrs = m / 60
+    return " · " + (hrs < 10 ? hrs.toFixed(1) : Math.round(hrs)) + " hrs"
+  }
+
   function onSteamLastPlayedListed(raw) {
     var lastPlayed = {}
+    var playtime = {}
     var lines = String(raw || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
       if (!line) continue
-      var tab = line.indexOf("\t")
-      if (tab === -1) continue
-      var appid = line.slice(0, tab).trim()
-      var epoch = parseInt(line.slice(tab + 1).trim(), 10)
+      var parts = line.split("\t")
+      if (parts.length < 2) continue
+      var appid = parts[0].trim()
+      var epoch = parseInt(parts[1], 10)
+      var mins = parts.length > 2 ? parseInt(parts[2], 10) : 0
       if (appid && !isNaN(epoch)) lastPlayed[appid] = epoch
+      if (appid && !isNaN(mins)) playtime[appid] = mins
     }
 
     var games = (root.steamGamesPending || []).map(function(g) {
       var copy = Object.assign({}, g)
       copy.lastPlayed = lastPlayed[g.appid] || 0
+      copy.playtimeMinutes = playtime[g.appid] || 0
       return copy
     })
-    // Most recently played first; never-played games (0) sink to the bottom,
-    // alphabetical among themselves and among same-timestamp ties.
+    // Currently-running games float to the top regardless of last-played;
+    // otherwise most recently played first, never-played (0) sinking to the
+    // bottom, alphabetical among ties.
     games.sort(function(a, b) {
+      var aRunning = root.isGameRunning(a.stateFlags)
+      var bRunning = root.isGameRunning(b.stateFlags)
+      if (aRunning !== bRunning) return aRunning ? -1 : 1
       if (b.lastPlayed !== a.lastPlayed) return b.lastPlayed - a.lastPlayed
       return a.name.localeCompare(b.name)
     })
@@ -758,14 +792,14 @@ BarWidget {
     // computed from the header items' own implicitHeight and the row/spacing
     // constants the delegate below already uses, rather than a flat magic
     // pixel number, so this stays correct if those constants ever change.
-    // Bumped from 72 to fit an achievement progress bar + label under the
-    // description on games that have one; games without achievement data
-    // just leave that space empty rather than shrinking the row per-item
-    // (a uniform row height keeps the "8 visible rows" math simple and
-    // correct without per-row variable sizing).
-    readonly property int steamRowHeight: Style.space(94)
+    // Each card is now 3 sub-rows (name+status / art+description /
+    // achievement bar) instead of 2 -- games without achievement data just
+    // leave that sub-row's space empty rather than shrinking the row
+    // per-item (a uniform row height keeps the "8 visible rows" math simple
+    // and correct without per-row variable sizing).
+    readonly property int steamRowHeight: Style.space(120)
     readonly property int steamVisibleRows: 8
-    readonly property int steamHeaderHeight: steamTitleText.implicitHeight + steamLauncherColumn.spacing + steamButtonsRow.implicitHeight
+    readonly property int steamHeaderHeight: steamHeaderRow.implicitHeight + steamLauncherColumn.spacing + steamSectionLabel.implicitHeight
     readonly property int steamListCapHeight: steamHeaderHeight + steamLauncherColumn.spacing
       + steamVisibleRows * steamRowHeight + (steamVisibleRows - 1) * steamLauncherColumn.spacing
     contentHeight: steamLauncherPopup.fittedContentHeight(steamLauncherColumn.implicitHeight, steamListCapHeight)
@@ -790,51 +824,70 @@ BarWidget {
         width: steamLauncherFlick.width
         spacing: Style.space(10)
 
-        Text {
-          id: steamTitleText
-          text: "Steam Launcher"
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: true
+        Item {
+          id: steamHeaderRow
+          width: parent.width
+          implicitHeight: Math.max(steamTitleText.implicitHeight, steamButtonsRow.implicitHeight)
+
+          Text {
+            id: steamTitleText
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Steam Launcher"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+
+          Row {
+            id: steamButtonsRow
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(6)
+
+            Button {
+              iconText: ""
+              text: "Library"
+              foreground: root.foreground
+              horizontalPadding: 8
+              verticalPadding: 3
+              iconSize: Style.font.bodySmall
+              fontSize: Style.font.bodySmall
+              onClicked: root.openSteamUri("steam://open/games")
+            }
+
+            Button {
+              iconText: ""
+              text: "Big Picture"
+              foreground: root.foreground
+              horizontalPadding: 8
+              verticalPadding: 3
+              iconSize: Style.font.bodySmall
+              fontSize: Style.font.bodySmall
+              onClicked: root.openSteamUri("steam://open/bigpicture")
+            }
+
+            Button {
+              iconText: "🥽"
+              text: "VR"
+              foreground: root.foreground
+              horizontalPadding: 8
+              verticalPadding: 3
+              iconSize: Style.font.bodySmall
+              fontSize: Style.font.bodySmall
+              onClicked: root.openSteamUri("steam://open/vr")
+            }
+          }
         }
 
-        Row {
-          id: steamButtonsRow
-          spacing: Style.space(6)
-
-          Button {
-            iconText: ""
-            text: "Library"
-            foreground: root.foreground
-            horizontalPadding: 8
-            verticalPadding: 3
-            iconSize: Style.font.bodySmall
-            fontSize: Style.font.bodySmall
-            onClicked: root.openSteamUri("steam://open/games")
-          }
-
-          Button {
-            iconText: ""
-            text: "Big Picture"
-            foreground: root.foreground
-            horizontalPadding: 8
-            verticalPadding: 3
-            iconSize: Style.font.bodySmall
-            fontSize: Style.font.bodySmall
-            onClicked: root.openSteamUri("steam://open/bigpicture")
-          }
-
-          Button {
-            iconText: "🥽"
-            text: "VR"
-            foreground: root.foreground
-            horizontalPadding: 8
-            verticalPadding: 3
-            iconSize: Style.font.bodySmall
-            fontSize: Style.font.bodySmall
-            onClicked: root.openSteamUri("steam://open/vr")
-          }
+        Text {
+          id: steamSectionLabel
+          text: "Installed games"
+          color: Qt.darker(root.foreground, 1.3)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
         }
 
         Text {
@@ -864,69 +917,26 @@ BarWidget {
             width: steamLauncherColumn.width
             implicitHeight: steamLauncherPopup.steamRowHeight
 
+            readonly property bool isRunning: root.isGameRunning(gameRow.modelData.stateFlags)
+            readonly property bool isUpdating: root.isGameUpdating(gameRow.modelData.stateFlags)
+
             Rectangle {
               anchors.fill: parent
               radius: Math.max(2, Style.cornerRadius)
               color: gameMouse.containsMouse ? Style.hoverFillFor(root.foreground, root.foreground) : "transparent"
             }
 
-            Image {
-              id: gameArt
-              // A binding (source: failed ? fallback : boxArt) is cyclic --
-              // status depends on source, and this would make source depend
-              // back on status -- Qt flagged it as a binding loop and the two
-              // URLs oscillated forever for any game lacking library art (e.g.
-              // Cogs, Toki Tori only ship header.jpg, no library_600x900.jpg).
-              // A one-shot imperative retry breaks the cycle: the assignment
-              // in onStatusChanged detaches this from the initial binding.
-              property bool triedFallback: false
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(6)
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(40)
-              height: Style.space(60)
-              fillMode: Image.PreserveAspectCrop
-              asynchronous: true
-              sourceSize.width: width * Screen.devicePixelRatio
-              sourceSize.height: height * Screen.devicePixelRatio
-              source: gameRow.modelData.boxArt
-              onStatusChanged: {
-                if (status === Image.Error && !triedFallback) {
-                  triedFallback = true
-                  source = gameRow.modelData.boxArtFallback
-                }
-              }
-            }
-
-            // Subtle hover affordance: a play glyph centered on the art, only
-            // while the row is hovered -- the row was already fully clickable
-            // to launch, this just makes that obvious at a glance.
-            Rectangle {
-              visible: gameMouse.containsMouse
-              anchors.centerIn: gameArt
-              width: Style.space(22)
-              height: width
-              radius: width / 2
-              color: Qt.rgba(0, 0, 0, 0.55)
-
-              Text {
-                anchors.centerIn: parent
-                anchors.horizontalCenterOffset: 1
-                text: ""
-                color: "white"
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-            }
-
             Column {
-              anchors.left: gameArt.right
-              anchors.leftMargin: Style.space(10)
+              id: gameColumn
+              anchors.left: parent.left
               anchors.right: parent.right
-              anchors.rightMargin: Style.space(8)
               anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(2)
+              anchors.margins: Style.space(6)
+              spacing: Style.space(4)
 
+              // Row 1: name (left), status/recency/playtime (right). Its own
+              // full-width row rather than sharing a column with the box art,
+              // so the description below has real horizontal room.
               Item {
                 width: parent.width
                 implicitHeight: nameText.implicitHeight
@@ -935,7 +945,7 @@ BarWidget {
                   id: nameText
                   textFormat: Text.PlainText
                   anchors.left: parent.left
-                  anchors.right: recencyText.left
+                  anchors.right: statusText.left
                   anchors.rightMargin: Style.space(6)
                   text: gameRow.modelData.name
                   color: root.foreground
@@ -946,48 +956,142 @@ BarWidget {
                 }
 
                 Text {
-                  id: recencyText
+                  id: statusText
                   textFormat: Text.PlainText
                   anchors.right: parent.right
-                  text: root.relativeLastPlayed(gameRow.modelData.lastPlayed)
-                  color: Qt.darker(root.foreground, 1.4)
+                  text: gameRow.isRunning ? "▶ Playing now"
+                    : gameRow.isUpdating ? "⬇ Updating…"
+                    : root.relativeLastPlayed(gameRow.modelData.lastPlayed) + root.playtimeSuffix(gameRow.modelData.playtimeMinutes)
+                  color: (gameRow.isRunning || gameRow.isUpdating) ? Color.accent : Qt.darker(root.foreground, 1.4)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
+                  font.bold: gameRow.isRunning || gameRow.isUpdating
                 }
               }
 
-              Text {
-                textFormat: Text.PlainText
+              // Row 2: box art (left) + description (right), each with the
+              // full row height to itself now that row 1 no longer shares
+              // this column.
+              Item {
+                id: artDescriptionRow
                 width: parent.width
-                visible: gameRow.modelData.descriptionLoaded
-                text: gameRow.modelData.description || "No description available."
-                color: Qt.darker(root.foreground, 1.3)
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-                maximumLineCount: 3
-                elide: Text.ElideRight
+                implicitHeight: Style.space(64)
+
+                Image {
+                  id: gameArt
+                  // A binding (source: failed ? fallback : boxArt) is cyclic --
+                  // status depends on source, and this would make source depend
+                  // back on status -- Qt flagged it as a binding loop and the two
+                  // URLs oscillated forever for any game lacking library art (e.g.
+                  // Cogs, Toki Tori only ship header.jpg, no library_600x900.jpg).
+                  // A one-shot imperative retry breaks the cycle: the assignment
+                  // in onStatusChanged detaches this from the initial binding.
+                  property bool triedFallback: false
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(44)
+                  height: Style.space(64)
+                  fillMode: Image.PreserveAspectCrop
+                  asynchronous: true
+                  sourceSize.width: width * Screen.devicePixelRatio
+                  sourceSize.height: height * Screen.devicePixelRatio
+                  source: gameRow.modelData.boxArt
+                  onStatusChanged: {
+                    if (status === Image.Error && !triedFallback) {
+                      triedFallback = true
+                      source = gameRow.modelData.boxArtFallback
+                    }
+                  }
+                }
+
+                // Subtle hover affordance: a play glyph centered on the art,
+                // only while the row is hovered -- the row was already fully
+                // clickable to launch, this just makes that obvious at a
+                // glance. Plain Unicode (not an icon-font codepoint): an
+                // earlier attempt at a Font Awesome glyph here silently
+                // ended up as a genuinely empty string (confirmed via a
+                // byte-level file dump, not just a rendering guess), so this
+                // uses a character that doesn't depend on any particular
+                // icon font's coverage.
+                Rectangle {
+                  visible: gameMouse.containsMouse
+                  anchors.centerIn: gameArt
+                  width: Style.space(22)
+                  height: width
+                  radius: width / 2
+                  color: Qt.rgba(0, 0, 0, 0.55)
+
+                  Text {
+                    anchors.centerIn: parent
+                    anchors.horizontalCenterOffset: 1
+                    text: "▶"
+                    color: "white"
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.left: gameArt.right
+                  anchors.leftMargin: Style.space(10)
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.bottom: parent.bottom
+                  verticalAlignment: Text.AlignVCenter
+                  visible: gameRow.modelData.descriptionLoaded
+                  text: gameRow.modelData.description || "No description available."
+                  color: Qt.darker(root.foreground, 1.3)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                  maximumLineCount: 4
+                  elide: Text.ElideRight
+                }
               }
 
-              // Steam's own local achievement-stat cache, not the Web API --
-              // see scripts/steam-achievements.py. Omitted (not a 0/0 bar)
-              // for a game Steam hasn't fetched stats for yet, or one with
-              // no ACHIEVEMENTS-type stats at all.
+              // Row 3: achievement progress -- trophy left, bar expanded to
+              // fill the row, numbers on the right. Steam's own local
+              // achievement-stat cache, not the Web API -- see
+              // scripts/steam-achievements.py. Omitted (not a 0/0 bar) for a
+              // game Steam hasn't fetched stats for yet, or one with no
+              // ACHIEVEMENTS-type stats at all.
               Item {
                 id: achievementRow
                 visible: gameRow.modelData.achievementsLoaded
                 width: parent.width
-                implicitHeight: Style.space(14)
+                implicitHeight: Style.space(20)
 
                 readonly property real fraction: gameRow.modelData.achievementsTotal > 0
                   ? gameRow.modelData.achievementsUnlocked / gameRow.modelData.achievementsTotal
                   : 0
 
-                Rectangle {
-                  id: achievementTrack
+                Text {
+                  id: trophyIcon
                   anchors.left: parent.left
                   anchors.verticalCenter: parent.verticalCenter
-                  width: Style.space(90)
+                  text: "🏆"
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Text {
+                  id: achievementLabel
+                  textFormat: Text.PlainText
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: gameRow.modelData.achievementsUnlocked + "/" + gameRow.modelData.achievementsTotal
+                    + " — " + Math.round(achievementRow.fraction * 100) + "%"
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Rectangle {
+                  id: achievementTrack
+                  anchors.left: trophyIcon.right
+                  anchors.leftMargin: Style.space(8)
+                  anchors.right: achievementLabel.left
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
                   height: Style.space(6)
                   radius: height / 2
                   color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
@@ -1000,18 +1104,6 @@ BarWidget {
                     color: root.foreground
                     width: Math.max(height, achievementTrack.width * achievementRow.fraction)
                   }
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  anchors.left: achievementTrack.right
-                  anchors.leftMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: gameRow.modelData.achievementsUnlocked + "/" + gameRow.modelData.achievementsTotal
-                    + " — " + Math.round(achievementRow.fraction * 100) + "%"
-                  color: Qt.darker(root.foreground, 1.4)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
                 }
               }
             }

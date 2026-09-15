@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Print "appid<TAB>lastplayed_epoch" for every app with a LastPlayed entry
-in the local Steam user's localconfig.vdf (KeyValues/VDF format). One line
-per app, unsorted -- sorting is the caller's job.
+"""Print "appid<TAB>lastplayed_epoch<TAB>playtime_minutes" for every app with
+a LastPlayed entry in the local Steam user's localconfig.vdf (KeyValues/VDF
+format). One line per app, unsorted -- sorting is the caller's job.
 """
 import glob
 import os
@@ -88,9 +88,14 @@ def main():
             return
 
     for appid, entry in node.items():
-        last_played = find_key_ci(entry, "LastPlayed") if isinstance(entry, dict) else None
-        if last_played and str(last_played).isdigit():
-            print(f"{appid}\t{last_played}")
+        if not isinstance(entry, dict):
+            continue
+        last_played = find_key_ci(entry, "LastPlayed")
+        if not (last_played and str(last_played).isdigit()):
+            continue
+        playtime = find_key_ci(entry, "Playtime")
+        playtime = playtime if playtime and str(playtime).isdigit() else 0
+        print(f"{appid}\t{last_played}\t{playtime}")
 
 
 if __name__ == "__main__":

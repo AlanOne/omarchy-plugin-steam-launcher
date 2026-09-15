@@ -2,8 +2,9 @@
 
 A Steam icon for the Omarchy bar that only shows up while Steam is running. Left-click it
 for a quick-launcher popup listing your installed games — box art, a short blurb, achievement
-progress, sorted by last-played — and launch one with a single click. Right-click still gives
-you Steam's own native context menu (Store, Library, Friends, Settings, Exit) as a fallback.
+progress, total playtime, sorted by last-played (a currently-running game always floats to
+the top) — and launch one with a single click. Right-click still gives you Steam's own native
+context menu (Store, Library, Friends, Settings, Exit) as a fallback.
 
 ![Steam Launcher popup](preview.png)
 
@@ -20,10 +21,15 @@ This plugin gives left-click something worth doing instead: a real launcher.
 - **Installed games** come from your local `~/.local/share/Steam/steamapps/appmanifest_*.acf`
   files (filtered to drop Proton/Steam Linux Runtime/SteamVR compatibility-layer entries
   that show up alongside real games in the same folder).
-- **Last-played sorting** reads Steam's own local `localconfig.vdf`
+- **Last-played sorting and total playtime** read Steam's own local `localconfig.vdf`
   (`~/.local/share/Steam/userdata/<your-id>/config/localconfig.vdf`) — a KeyValues/VDF file
   parsed by a small dependency-free Python script bundled in [`scripts/`](scripts). Nothing
   is sent anywhere; this is a local file read.
+- **"Playing now" and "Updating…" status** come from the same `StateFlags` bitmask Steam
+  already writes into each game's `appmanifest_<appid>.acf` (a well-established, community-
+  documented set of bits — `AppRunning`, `Downloading`, `UpdateRunning`, etc.) — read fresh
+  on every popup open, no separate polling process. A running game always sorts to the top
+  regardless of when it was last played.
 - **Box art** loads straight from Steam's public, keyless CDN
   (`cdn.akamai.steamstatic.com/steam/apps/<appid>/library_600x900.jpg`, falling back to
   `header.jpg` for games that don't ship the taller format).
@@ -77,9 +83,11 @@ omarchy plugin add https://github.com/AlanOne/omarchy-plugin-steam-launcher.git 
 ## Usage
 
 - **Left-click** the Steam icon: opens the quick-launcher. Click any game to launch it.
-  **Library**, **Big Picture**, and **VR** buttons at the top jump straight to those Steam
-  modes. The list shows up to 8 games before scrolling; hovering a game shows a small play
-  button on its box art as a launch affordance (the whole row is clickable either way).
+  **Library**, **Big Picture**, and **VR** buttons sit next to the title. The list shows up
+  to 8 games before scrolling; hovering a game shows a small play button on its box art as a
+  launch affordance (the whole row is clickable either way). A game currently running shows
+  "▶ Playing now" instead of its last-played time and sorts above everything else; one
+  actively downloading/updating shows "⬇ Updating…".
 - **Right-click**: Steam's own native context menu (Store, Library, Community, Friends,
   Settings, Big Picture, SteamVR, Exit Steam) — submenus (e.g. the "recently played" list
   some Steam versions show here) work too, rendered inline rather than as a native platform
