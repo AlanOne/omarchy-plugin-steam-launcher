@@ -90,6 +90,66 @@ BarWidget {
   property bool steamGamesLoaded: false
   property var steamGamesPending: null
 
+  // Rescanning cadence: a full rescan on every single popup open was needless
+  // churn for data that rarely changes moment-to-moment (Alan's feedback).
+  // Instead: a cheap mtime-based change check (a handful of stat() calls, not
+  // the VDF/binary parsing the real rescan does) on a short interval, running
+  // in the background regardless of whether the popup is open, so data is
+  // already warm by the time it's opened. A longer fallback interval forces a
+  // full rescan periodically even if the cheap check somehow misses a change.
+  // 5 minutes / 3 hours are reasonable defaults for a personal desktop
+  // widget, not load-bearing precise numbers -- installing a game and wanting
+  // to see it appear within a few minutes felt right; anything shorter buys
+  // little for the extra stat() calls, anything longer starts to feel stale.
+  property string steamDataSignature: ""
+  property double steamLastFullScanAt: 0
+  readonly property int steamChangeCheckIntervalMs: 5 * 60 * 1000
+  readonly property int steamFullScanFallbackMs: 3 * 60 * 60 * 1000
+
+  Timer {
+    id: steamChangeCheckTimer
+    interval: root.steamChangeCheckIntervalMs
+    repeat: true
+    running: true
+    triggeredOnStart: true
+    onTriggered: root.checkSteamDataForChanges()
+  }
+
+  Process {
+    id: steamDataSignatureProc
+    // Concatenated mtimes of everything the installed-games rescan actually
+    // depends on: the steamapps dir (install/uninstall adds or removes an
+    // appmanifest_*.acf), localconfig.vdf (last-played/playtime updates),
+    // and the achievement stat cache dir (new achievement data). A changed
+    // signature means "worth paying for a real rescan"; an unchanged one
+    // means the expensive parsing below can be skipped entirely.
+    command: ["bash", "-c",
+      "for p in \"$HOME/.local/share/Steam/steamapps\" \"$HOME/.local/share/Steam/appcache/stats\" \"$HOME\"/.local/share/Steam/userdata/*/config/localconfig.vdf; do stat -c '%Y' \"$p\" 2>/dev/null; done | tr '\\n' ','"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.onSteamDataSignature(text)
+    }
+  }
+
+  function checkSteamDataForChanges() {
+    if (!steamDataSignatureProc.running) steamDataSignatureProc.running = true
+  }
+
+  function onSteamDataSignature(raw) {
+    var sig = String(raw || "").trim()
+    var now = Date.now()
+    var overdue = (now - root.steamLastFullScanAt) >= root.steamFullScanFallbackMs
+    var changed = root.steamDataSignature !== "" && sig !== root.steamDataSignature
+    root.steamDataSignature = sig
+    if ((!root.steamGamesLoaded || changed || overdue) && !root.steamGamesLoading) loadSteamGames()
+  }
+
+  // "installed" or "notinstalled" -- which tab is showing below the search
+  // bar. The search query is intentionally shared/not reset when switching
+  // tabs (typing a name, not finding it installed, then checking the other
+  // tab keeps the same filter applied -- more useful than surprising).
+  property string steamActiveTab: "installed"
+
   // Search box state. Filtering is a pure client-side name match over the
   // already-loaded list -- no rescan, no process spawn -- so it can just be
   // a computed property re-evaluated on every keystroke.
@@ -98,6 +158,11 @@ BarWidget {
     var q = steamSearchQuery.trim().toLowerCase()
     if (!q) return steamGames
     return steamGames.filter(function(g) { return g.name.toLowerCase().indexOf(q) !== -1 })
+  }
+  readonly property var filteredSteamNotInstalled: {
+    var q = steamSearchQuery.trim().toLowerCase()
+    if (!q) return steamNotInstalled
+    return steamNotInstalled.filter(function(g) { return g.name.toLowerCase().indexOf(q) !== -1 })
   }
 
   // Disk usage always reflects the full install list, not the filtered one
@@ -121,7 +186,6 @@ BarWidget {
   property var steamNotInstalled: []
   property bool steamNotInstalledLoading: false
   property bool steamNotInstalledLoaded: false
-  property bool steamNotInstalledExpanded: false
 
   // Persisted across shell restarts (the shell process itself restarts far
   // more often than a game's store blurb changes -- suspend/resume can
@@ -226,16 +290,12 @@ BarWidget {
     trayMenuOpen = false
     steamPopupAnchor = anchorItem
     steamPopupOpen = true
-    // Rescan every open, not just the first: appmanifest_*.acf files come
-    // and go as games are installed/uninstalled, with nothing to notify us
-    // of that. The rescan itself is two cheap local reads (an ls-and-grep
-    // over appmanifest files, a local VDF parse) -- no network -- and the
-    // per-game description fetch is separately cache-gated (30 days), so
-    // re-running this on every open costs nothing for games already known
-    // and picks up anything installed/removed since the popup last opened.
-    // A lingering steamGamesLoading only means a prior scan is still in
-    // flight (e.g. opened twice in quick succession); don't stack another.
-    if (!steamGamesLoading) loadSteamGames()
+    steamActiveTab = "installed"
+    // Bootstrap only: the background timer (steamChangeCheckTimer) plus its
+    // cheap mtime-based change detection keeps this fresh without a rescan
+    // tied to the act of opening -- this just covers the very first open of
+    // the session, before that timer has had a chance to run yet.
+    if (!steamGamesLoaded && !steamGamesLoading) loadSteamGames()
   }
 
   function loadSteamGames() {
@@ -282,6 +342,7 @@ BarWidget {
         // the local-data path shows, without claiming a bar/count we don't
         // actually know.
         achievementsStoreNone: false,
+        tags: [],
         boxArt: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/library_600x900.jpg",
         boxArtFallback: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/header.jpg"
       })
@@ -326,9 +387,9 @@ BarWidget {
     return (n / (1024 * 1024 * 1024)).toFixed(1) + " GB"
   }
 
-  function toggleSteamNotInstalled() {
-    steamNotInstalledExpanded = !steamNotInstalledExpanded
-    if (steamNotInstalledExpanded) loadSteamNotInstalled()
+  function switchSteamTab(tab) {
+    steamActiveTab = tab
+    if (tab === "notinstalled") loadSteamNotInstalled()
   }
 
   function loadSteamNotInstalled() {
@@ -401,6 +462,7 @@ BarWidget {
     root.steamGames = games
     root.steamGamesLoading = false
     root.steamGamesLoaded = true
+    root.steamLastFullScanAt = Date.now()
     for (var g = 0; g < games.length; g++) fetchSteamDescription(games[g].appid)
     loadSteamAchievements()
   }
@@ -493,6 +555,7 @@ BarWidget {
       if (ageSec >= 0 && ageSec < root.descriptionCacheMaxAgeSec) {
         root.setSteamGameField(appid, "description", cached.description || "")
         root.setSteamGameField(appid, "achievementsStoreNone", !!cached.noAchievements)
+        root.setSteamGameField(appid, "tags", Array.isArray(cached.tags) ? cached.tags : [])
         root.setSteamGameField(appid, "descriptionLoaded", true)
         return
       }
@@ -501,9 +564,9 @@ BarWidget {
     fetcher.start()
   }
 
-  function cacheSteamDescription(appid, description, noAchievements) {
+  function cacheSteamDescription(appid, description, noAchievements, tags) {
     var cache = Object.assign({}, root.descriptionCache)
-    cache[appid] = { description: description, noAchievements: !!noAchievements, fetchedAt: Math.floor(Date.now() / 1000) }
+    cache[appid] = { description: description, noAchievements: !!noAchievements, tags: tags || [], fetchedAt: Math.floor(Date.now() / 1000) }
     root.descriptionCache = cache
     descriptionCacheFile.setText(JSON.stringify(cache))
   }
@@ -631,14 +694,16 @@ BarWidget {
       required property string appid
 
       function start() {
-        // "categories" alongside "basic" costs nothing extra (one request,
-        // already being made for the description) but recovers a fallback
-        // signal for whether a game has achievements at all, for a game
-        // with zero local achievement-stat cache (never launched/viewed in
-        // Steam, so scripts/steam-achievements.py has nothing to report) --
-        // category id 22 is Valve's own "Steam Achievements" store tag.
+        // "categories"/"genres" alongside "basic" cost nothing extra (one
+        // request, already being made for the description). categories
+        // recovers a fallback signal for whether a game has achievements at
+        // all, for a game with zero local achievement-stat cache (never
+        // launched/viewed in Steam, so scripts/steam-achievements.py has
+        // nothing to report) -- category id 22 is Valve's own "Steam
+        // Achievements" store tag. genres gives up to 5 tags to show under
+        // the description (e.g. "Action, Indie, Strategy").
         command = ["curl", "-fsS", "--max-time", "6",
-          "https://store.steampowered.com/api/appdetails?appids=" + appid + "&filters=basic,categories&l=english"]
+          "https://store.steampowered.com/api/appdetails?appids=" + appid + "&filters=basic,categories,genres&l=english"]
         running = true
       }
 
@@ -657,9 +722,12 @@ BarWidget {
               var categories = (entry.data && Array.isArray(entry.data.categories)) ? entry.data.categories : []
               var hasAchievementsTag = categories.some(function(c) { return c && c.id === 22 })
               var noAchievements = !hasAchievementsTag
+              var genres = (entry.data && Array.isArray(entry.data.genres)) ? entry.data.genres : []
+              var tags = genres.map(function(g) { return String(g && g.description || "") }).filter(function(t) { return t !== "" }).slice(0, 5)
               root.setSteamGameField(fetchProc.appid, "description", desc)
               root.setSteamGameField(fetchProc.appid, "achievementsStoreNone", noAchievements)
-              root.cacheSteamDescription(fetchProc.appid, desc, noAchievements)
+              root.setSteamGameField(fetchProc.appid, "tags", tags)
+              root.cacheSteamDescription(fetchProc.appid, desc, noAchievements, tags)
             }
           } catch (e) {
             // Leave description blank this run; the card still shows name + art.
@@ -949,12 +1017,18 @@ BarWidget {
     // leave that sub-row's space empty rather than shrinking the row
     // per-item (a uniform row height keeps the "8 visible rows" math simple
     // and correct without per-row variable sizing).
-    readonly property int steamRowHeight: Style.space(120)
+    readonly property int steamRowHeight: Style.space(140)
+    // "Not installed" rows are name + Install button only -- much shorter
+    // than an installed game's 3-sub-row card -- so the "N rows visible"
+    // cap uses whichever row height matches the currently active tab
+    // instead of always sizing for the taller installed-game card.
+    readonly property int steamNotInstalledRowHeight: Style.space(30)
+    readonly property int steamActiveRowHeight: root.steamActiveTab === "installed" ? steamRowHeight : steamNotInstalledRowHeight
     readonly property int steamVisibleRows: 8
     readonly property int steamHeaderHeight: steamHeaderRow.implicitHeight + steamLauncherColumn.spacing
-      + steamLabelRow.implicitHeight + steamLauncherColumn.spacing + steamSearchField.implicitHeight
+      + steamTabsRow.implicitHeight + steamLauncherColumn.spacing + steamSearchField.implicitHeight
     readonly property int steamListCapHeight: steamHeaderHeight + steamLauncherColumn.spacing
-      + steamVisibleRows * steamRowHeight + (steamVisibleRows - 1) * steamLauncherColumn.spacing
+      + steamVisibleRows * steamActiveRowHeight + (steamVisibleRows - 1) * steamLauncherColumn.spacing
     contentHeight: steamLauncherPopup.fittedContentHeight(steamLauncherColumn.implicitHeight, steamListCapHeight)
 
     // A library beyond a handful of games would otherwise just grow the
@@ -1051,28 +1125,91 @@ BarWidget {
         }
 
         Item {
-          id: steamLabelRow
+          id: steamTabsRow
           width: parent.width
-          implicitHeight: Math.max(steamSectionLabel.implicitHeight, steamDiskUsageText.implicitHeight)
+          implicitHeight: Math.max(installedTab.height, notInstalledTab.height, steamDiskUsageText.implicitHeight)
 
-          // Shows the filtered count while a search is active -- the total
-          // count would be misleading sitting right above a shorter list.
-          Text {
-            id: steamSectionLabel
+          Row {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            text: "Installed games (" + root.filteredSteamGames.length + ")"
-            color: Qt.darker(root.foreground, 1.3)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
+            spacing: Style.space(16)
+
+            // Shows the filtered count while a search is active -- the total
+            // count would be misleading sitting above a shorter list.
+            Item {
+              id: installedTab
+              width: installedTabText.implicitWidth
+              height: installedTabText.implicitHeight + Style.space(5)
+
+              Text {
+                id: installedTabText
+                anchors.left: parent.left
+                anchors.top: parent.top
+                text: "Installed games (" + root.filteredSteamGames.length + ")"
+                color: root.steamActiveTab === "installed" ? root.foreground : Qt.darker(root.foreground, 1.5)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: root.steamActiveTab === "installed"
+              }
+
+              Rectangle {
+                visible: root.steamActiveTab === "installed"
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: Math.max(1, Style.space(2))
+                radius: height / 2
+                color: root.foreground
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.switchSteamTab("installed")
+              }
+            }
+
+            // Count stays blank until the section has actually been loaded
+            // once (lazy -- see steamNotInstalled's own property comment).
+            Item {
+              id: notInstalledTab
+              width: notInstalledTabText.implicitWidth
+              height: notInstalledTabText.implicitHeight + Style.space(5)
+
+              Text {
+                id: notInstalledTabText
+                anchors.left: parent.left
+                anchors.top: parent.top
+                text: "Not installed" + (root.steamNotInstalledLoaded ? " (" + root.filteredSteamNotInstalled.length + ")" : "")
+                color: root.steamActiveTab === "notinstalled" ? root.foreground : Qt.darker(root.foreground, 1.5)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: root.steamActiveTab === "notinstalled"
+              }
+
+              Rectangle {
+                visible: root.steamActiveTab === "notinstalled"
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: Math.max(1, Style.space(2))
+                radius: height / 2
+                color: root.foreground
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.switchSteamTab("notinstalled")
+              }
+            }
           }
 
-          // Disk usage always reflects the full list regardless of search --
-          // see totalDiskBytes's own comment.
+          // Disk usage only means something for installed games -- see
+          // totalDiskBytes's own comment on why it ignores the search filter.
           Text {
             id: steamDiskUsageText
-            visible: root.steamGames.length > 0
+            visible: root.steamActiveTab === "installed" && root.steamGames.length > 0
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             text: root.formatBytes(root.totalDiskBytes) + " total"
@@ -1086,7 +1223,7 @@ BarWidget {
           id: steamSearchField
           width: parent.width
           verticalPadding: 4
-          placeholderText: "Search games…"
+          placeholderText: root.steamActiveTab === "installed" ? "Search games…" : "Search owned games…"
           foreground: root.foreground
           font.family: root.fontFamily
           text: root.steamSearchQuery
@@ -1094,7 +1231,7 @@ BarWidget {
         }
 
         Text {
-          visible: root.steamGamesLoading && root.steamGames.length === 0
+          visible: root.steamActiveTab === "installed" && root.steamGamesLoading && root.steamGames.length === 0
           text: "Loading library…"
           color: Qt.darker(root.foreground, 1.5)
           font.family: root.fontFamily
@@ -1103,7 +1240,7 @@ BarWidget {
         }
 
         Text {
-          visible: root.steamGamesLoaded && root.steamGames.length === 0
+          visible: root.steamActiveTab === "installed" && root.steamGamesLoaded && root.steamGames.length === 0
           text: root.steamInstalled ? "No installed games found." : "Steam is not installed on this machine."
           color: Qt.darker(root.foreground, 1.5)
           font.family: root.fontFamily
@@ -1112,7 +1249,7 @@ BarWidget {
         }
 
         Text {
-          visible: root.steamGamesLoaded && root.steamGames.length > 0
+          visible: root.steamActiveTab === "installed" && root.steamGamesLoaded && root.steamGames.length > 0
             && root.filteredSteamGames.length === 0 && root.steamSearchQuery.trim() !== ""
           text: "No games match \"" + root.steamSearchQuery.trim() + "\"."
           color: Qt.darker(root.foreground, 1.5)
@@ -1122,7 +1259,9 @@ BarWidget {
         }
 
         Repeater {
-          model: root.filteredSteamGames
+          // Zero delegates while the other tab is active, not just hidden
+          // ones -- same reasoning as the not-installed Repeater below.
+          model: root.steamActiveTab === "installed" ? root.filteredSteamGames : []
 
           delegate: Item {
             id: gameRow
@@ -1188,7 +1327,7 @@ BarWidget {
               Item {
                 id: artDescriptionRow
                 width: parent.width
-                implicitHeight: Style.space(64)
+                implicitHeight: Style.space(84)
 
                 Image {
                   id: gameArt
@@ -1244,12 +1383,13 @@ BarWidget {
                 }
 
                 Text {
+                  id: descriptionText
                   textFormat: Text.PlainText
                   anchors.left: gameArt.right
                   anchors.leftMargin: Style.space(10)
                   anchors.right: parent.right
                   anchors.top: parent.top
-                  anchors.bottom: parent.bottom
+                  anchors.bottom: tagsText.top
                   verticalAlignment: Text.AlignVCenter
                   visible: gameRow.modelData.descriptionLoaded
                   text: gameRow.modelData.description || "No description available."
@@ -1257,7 +1397,28 @@ BarWidget {
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   wrapMode: Text.WordWrap
-                  maximumLineCount: 4
+                  maximumLineCount: 3
+                  elide: Text.ElideRight
+                }
+
+                // Up to 5 genre tags from Steam's own store data, appended
+                // after the description as a distinct muted line rather than
+                // folded into the prose -- same caption styling used
+                // elsewhere in this popup (disk usage, achievement count).
+                Text {
+                  id: tagsText
+                  textFormat: Text.PlainText
+                  anchors.left: gameArt.right
+                  anchors.leftMargin: Style.space(10)
+                  anchors.right: parent.right
+                  anchors.bottom: parent.bottom
+                  height: visible ? implicitHeight : 0
+                  visible: gameRow.modelData.descriptionLoaded && gameRow.modelData.tags.length > 0
+                  text: gameRow.modelData.tags.join(" · ")
+                  color: Qt.darker(root.foreground, 1.6)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.italic: true
                   elide: Text.ElideRight
                 }
               }
@@ -1356,35 +1517,11 @@ BarWidget {
           }
         }
 
-        // Owned-but-not-installed games -- collapsed and unloaded until
-        // first expanded (see steamNotInstalled's own property comment for
-        // why this isn't just rescanned eagerly like everything else).
-        Item {
-          id: steamNotInstalledHeader
-          width: parent.width
-          implicitHeight: steamNotInstalledLabel.implicitHeight
-
-          Text {
-            id: steamNotInstalledLabel
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            text: (root.steamNotInstalledExpanded ? "▾ " : "▸ ") + "Not installed"
-              + (root.steamNotInstalledLoaded ? " (" + root.steamNotInstalled.length + ")" : "")
-            color: Qt.darker(root.foreground, 1.3)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-          }
-
-          MouseArea {
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.toggleSteamNotInstalled()
-          }
-        }
-
+        // Owned-but-not-installed games -- the tab above triggers the load
+        // (see steamNotInstalled's own property comment for why this isn't
+        // just rescanned eagerly like the installed list).
         Text {
-          visible: root.steamNotInstalledExpanded && root.steamNotInstalledLoading
+          visible: root.steamActiveTab === "notinstalled" && root.steamNotInstalledLoading
           text: "Loading owned games…"
           color: Qt.darker(root.foreground, 1.5)
           font.family: root.fontFamily
@@ -1393,7 +1530,7 @@ BarWidget {
         }
 
         Text {
-          visible: root.steamNotInstalledExpanded && root.steamNotInstalledLoaded && root.steamNotInstalled.length === 0
+          visible: root.steamActiveTab === "notinstalled" && root.steamNotInstalledLoaded && root.steamNotInstalled.length === 0
           text: "Everything you own is already installed."
           color: Qt.darker(root.foreground, 1.5)
           font.family: root.fontFamily
@@ -1401,11 +1538,22 @@ BarWidget {
           font.italic: true
         }
 
+        Text {
+          visible: root.steamActiveTab === "notinstalled" && root.steamNotInstalledLoaded && root.steamNotInstalled.length > 0
+            && root.filteredSteamNotInstalled.length === 0 && root.steamSearchQuery.trim() !== ""
+          text: "No games match \"" + root.steamSearchQuery.trim() + "\"."
+          color: Qt.darker(root.foreground, 1.5)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.italic: true
+        }
+
         Repeater {
-          // Zero delegates while collapsed, not just hidden ones -- with
-          // 500+ owned-but-uninstalled games common for a long-time
-          // account, there's no reason to pay for rows nobody's looking at.
-          model: root.steamNotInstalledExpanded ? root.steamNotInstalled : []
+          // Zero delegates while the other tab is active, not just hidden
+          // ones -- with 500+ owned-but-uninstalled games common for a
+          // long-time account, there's no reason to pay for rows nobody's
+          // looking at.
+          model: root.steamActiveTab === "notinstalled" ? root.filteredSteamNotInstalled : []
 
           delegate: Item {
             id: notInstalledRow
