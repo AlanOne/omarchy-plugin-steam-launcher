@@ -109,6 +109,20 @@ BarWidget {
     return sum
   }
 
+  // Owned-but-not-installed games: collapsed and unloaded by default. The
+  // scan is a real ~0.25s (parsing a multi-MB appinfo.vdf in Python, unlike
+  // the other sub-millisecond-scale local reads this popup already does on
+  // every open), and most opens are "launch something already installed" --
+  // paying that cost eagerly on every single open for a section most opens
+  // never look at isn't worth it. Loaded once on first expand, then kept
+  // for the rest of the session (owned/installed status doesn't change
+  // often enough to justify rescanning every popup open the way the
+  // installed list does).
+  property var steamNotInstalled: []
+  property bool steamNotInstalledLoading: false
+  property bool steamNotInstalledLoaded: false
+  property bool steamNotInstalledExpanded: false
+
   // Persisted across shell restarts (the shell process itself restarts far
   // more often than a game's store blurb changes -- suspend/resume can
   // SIGKILL and relaunch it, `omarchy restart shell`, plugin hot-reloads,
@@ -299,6 +313,44 @@ BarWidget {
     if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB"
     if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB"
     return (n / (1024 * 1024 * 1024)).toFixed(1) + " GB"
+  }
+
+  function toggleSteamNotInstalled() {
+    steamNotInstalledExpanded = !steamNotInstalledExpanded
+    if (steamNotInstalledExpanded) loadSteamNotInstalled()
+  }
+
+  function loadSteamNotInstalled() {
+    if (steamNotInstalledLoaded || steamNotInstalledLoading) return
+    steamNotInstalledLoading = true
+    steamNotInstalledProc.command = ["python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.alanone.steam-launcher/scripts/steam-not-installed.py"]
+    steamNotInstalledProc.running = true
+  }
+
+  function onSteamNotInstalledListed(raw) {
+    var lines = String(raw || "").split("\n")
+    var games = []
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i]
+      if (!line) continue
+      var tab = line.indexOf("\t")
+      if (tab === -1) continue
+      var appid = line.slice(0, tab).trim()
+      var name = line.slice(tab + 1).trim()
+      if (!appid || !name) continue
+      games.push({ appid: appid, name: name })
+    }
+    root.steamNotInstalled = games
+    root.steamNotInstalledLoading = false
+    root.steamNotInstalledLoaded = true
+  }
+
+  // Doesn't close the popup, unlike launchSteamApp -- browsing and kicking
+  // off installs for a few owned-but-uninstalled games in one sitting is a
+  // reasonable thing to want to do, and each one is a fire-and-forget
+  // request to Steam (it handles the actual download in its own UI).
+  function installSteamApp(appid) {
+    Util.execArgv(["xdg-open", "steam://install/" + appid])
   }
 
   function onSteamLastPlayedListed(raw) {
@@ -545,6 +597,14 @@ BarWidget {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.onSteamAchievementsListed(text)
+    }
+  }
+
+  Process {
+    id: steamNotInstalledProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.onSteamNotInstalledListed(text)
     }
   }
 
@@ -1267,6 +1327,107 @@ BarWidget {
               onEntered: if (root.bar) root.bar.showTooltip(gameRow, "Launch")
               onExited: if (root.bar) root.bar.hideTooltip(gameRow)
               onClicked: root.launchSteamApp(gameRow.modelData.appid)
+            }
+          }
+        }
+
+        // Owned-but-not-installed games -- collapsed and unloaded until
+        // first expanded (see steamNotInstalled's own property comment for
+        // why this isn't just rescanned eagerly like everything else).
+        Item {
+          id: steamNotInstalledHeader
+          width: parent.width
+          implicitHeight: steamNotInstalledLabel.implicitHeight
+
+          Text {
+            id: steamNotInstalledLabel
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: (root.steamNotInstalledExpanded ? "▾ " : "▸ ") + "Not installed"
+              + (root.steamNotInstalledLoaded ? " (" + root.steamNotInstalled.length + ")" : "")
+            color: Qt.darker(root.foreground, 1.3)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.toggleSteamNotInstalled()
+          }
+        }
+
+        Text {
+          visible: root.steamNotInstalledExpanded && root.steamNotInstalledLoading
+          text: "Loading owned games…"
+          color: Qt.darker(root.foreground, 1.5)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.italic: true
+        }
+
+        Text {
+          visible: root.steamNotInstalledExpanded && root.steamNotInstalledLoaded && root.steamNotInstalled.length === 0
+          text: "Everything you own is already installed."
+          color: Qt.darker(root.foreground, 1.5)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.italic: true
+        }
+
+        Repeater {
+          // Zero delegates while collapsed, not just hidden ones -- with
+          // 500+ owned-but-uninstalled games common for a long-time
+          // account, there's no reason to pay for rows nobody's looking at.
+          model: root.steamNotInstalledExpanded ? root.steamNotInstalled : []
+
+          delegate: Item {
+            id: notInstalledRow
+            required property var modelData
+            width: steamLauncherColumn.width
+            implicitHeight: Style.space(30)
+
+            Rectangle {
+              anchors.fill: parent
+              radius: Math.max(2, Style.cornerRadius)
+              color: notInstalledMouse.containsMouse ? Style.hoverFillFor(root.foreground, root.foreground) : "transparent"
+            }
+
+            // Declared before the name/button below so it sits underneath
+            // them in stacking order -- hover highlighting for the row
+            // without stealing the Install button's own clicks.
+            MouseArea {
+              id: notInstalledMouse
+              anchors.fill: parent
+              hoverEnabled: true
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(6)
+              anchors.right: installButton.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              text: notInstalledRow.modelData.name
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+
+            Button {
+              id: installButton
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Install"
+              foreground: root.foreground
+              horizontalPadding: 8
+              verticalPadding: 3
+              fontSize: Style.font.bodySmall
+              onClicked: root.installSteamApp(notInstalledRow.modelData.appid)
             }
           }
         }

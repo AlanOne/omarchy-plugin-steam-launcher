@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "Alan",
   "license": "MIT",
-  "description": "A Steam icon for the bar that only appears while Steam is running. Left-click opens a quick-launcher popup for your installed games, with box art and a blurb pulled from Steam's free endpoints, sorted by last-played. One click launches a game. Right-click still gives Steam's own native menu (Store, Library, Friends, Settings, Exit).",
+  "description": "An always-visible Steam icon for the bar. Left-click opens a quick-launcher popup for your installed games, with box art and a blurb pulled from Steam's free endpoints, sorted by last-played, plus a collapsed list of everything else you own with one-click Install buttons. One click launches a game. Right-click still gives Steam's own native menu (Store, Library, Friends, Settings, Exit).",
   "kinds": [
     "bar-widget"
   ],

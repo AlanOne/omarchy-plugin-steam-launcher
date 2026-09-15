@@ -1,10 +1,12 @@
 # Steam Launcher
 
-A Steam icon for the Omarchy bar that only shows up while Steam is running. Left-click it
-for a quick-launcher popup listing your installed games — box art, a short blurb, achievement
-progress, total playtime, sorted by last-played (a currently-running game always floats to
-the top) — and launch one with a single click. Right-click still gives you Steam's own native
-context menu (Store, Library, Friends, Settings, Exit) as a fallback.
+A Steam icon for the Omarchy bar, always visible whether Steam is running, closed, or not
+even installed. Left-click it for a quick-launcher popup listing your installed games — box
+art, a short blurb, achievement progress, total playtime, sorted by last-played (a
+currently-running game always floats to the top) — and launch one with a single click. A
+collapsed "Not installed" section lists everything else you own, each with a one-click
+Install button. Right-click still gives you Steam's own native context menu (Store, Library,
+Friends, Settings, Exit) as a fallback while Steam is running.
 
 ![Steam Launcher popup](preview.png)
 
@@ -56,6 +58,28 @@ This plugin gives left-click something worth doing instead: a real launcher.
 - **Search** filters the list by name as you type, entirely client-side over the
   already-loaded games (no rescan, no process spawn). The "Installed games (N)" count
   reflects the filtered results while a search is active.
+- **The "Not installed" section** lists games you own but haven't installed, each with an
+  Install button (`steam://install/<appid>`). Two local, keyless sources, no Web API key:
+  - Which appids you *own* comes from the same `localconfig.vdf` used for last-played/
+    playtime — its `apps` section lists every appid Steam has ever written local per-user
+    config for, which for a long-time account is effectively "owned", going back years.
+  - Names (and enough info to filter out DLC/Tools/Demos/etc., leaving actual games) come
+    from `~/.local/share/Steam/appcache/appinfo.vdf` — Steam's local cache of metadata for
+    every app it's ever loaded a store/library page for. This is a genuinely more involved
+    binary format than the achievement cache's: a fixed header, a sequence of per-app
+    entries, then a shared string table at the end of the file that every app entry's field
+    *names* are looked up in by index (rather than each repeating "name", "type", etc.
+    inline hundreds of times) — decoded by
+    [`scripts/steam-not-installed.py`](scripts/steam-not-installed.py), which also copies
+    the plaintext-VDF parser from `steam-last-played.py` (these scripts intentionally don't
+    import each other) to get the owned-appid list. Validated against ground truth before
+    being trusted: it correctly recovers the real names of every currently-installed game
+    tested against it before ever being pointed at an owned-but-not-installed one.
+  - Collapsed and unscanned by default — parsing a multi-megabyte file is real work (~0.25s
+    on this machine) compared to everything else this popup does, and most popup opens are
+    "launch something already installed," so it's not worth paying that cost on every open
+    the way the (sub-millisecond) installed-games rescan is. Loaded once on first expand,
+    kept for the rest of the session.
 
 **Two Quickshell/Steam quirks this plugin works around**, worth knowing if you're reading
 the source:
@@ -94,7 +118,9 @@ omarchy plugin add https://github.com/AlanOne/omarchy-plugin-steam-launcher.git 
   to filter by name. The list shows up to 8 games before scrolling; hovering a game shows a
   small play button on its box art as a launch affordance (the whole row is clickable either
   way). A game currently running shows "▶ Playing now" instead of its last-played time and
-  sorts above everything else; one actively downloading/updating shows "⬇ Updating…".
+  sorts above everything else; one actively downloading/updating shows "⬇ Updating…". Below
+  the installed list, a collapsed "▸ Not installed" section expands (on first click, loading
+  the list) into everything else you own, each with its own Install button.
 - **Right-click**: Steam's own native context menu (Store, Library, Community, Friends,
   Settings, Big Picture, SteamVR, Exit Steam) — submenus (e.g. the "recently played" list
   some Steam versions show here) work too, rendered inline rather than as a native platform
@@ -131,9 +157,12 @@ omarchy plugin remove io.github.alanone.steam-launcher
 - The only network calls are to Steam's own CDN (box art) and store API (descriptions) —
   both public, keyless, read-only endpoints. No credentials are used or stored anywhere.
 - Reads local files that are entirely yours already (`appmanifest_*.acf`, `localconfig.vdf`,
-  and the local achievement stat cache under `appcache/stats/`) — nothing here is sent
-  anywhere, they're only used to build the local games list, sort order, and achievement
-  progress.
+  the local achievement stat cache under `appcache/stats/`, and `appcache/appinfo.vdf` for
+  the "Not installed" section) — nothing here is sent anywhere, they're only used to build
+  the local games list, sort order, achievement progress, and owned-but-not-installed list.
+- Clicking "Install" only ever hands Steam a `steam://install/<appid>` URI and lets Steam's
+  own client handle the rest (its own confirmation, download, disk space check, etc.) — this
+  plugin never downloads or installs anything itself.
 
 ## Troubleshooting
 
