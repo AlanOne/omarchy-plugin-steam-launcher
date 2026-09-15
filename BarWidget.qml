@@ -271,6 +271,17 @@ BarWidget {
         achievementsUnlocked: 0,
         achievementsTotal: 0,
         achievementsLoaded: false,
+        // Fallback for a game with no local achievement stat cache at all
+        // (never launched/viewed in Steam -- achievementsLoaded stays
+        // false forever for those from local data alone). Steam's store
+        // page's own category list is a free, already-fetched signal for
+        // "does this game have achievements at all" -- confirmed both
+        // directions: CloverPit's appdetails response includes category id
+        // 22 ("Steam Achievements"), Lone Survivor's doesn't, and Lone
+        // Survivor genuinely has none. Sets the same "No achievements" row
+        // the local-data path shows, without claiming a bar/count we don't
+        // actually know.
+        achievementsStoreNone: false,
         boxArt: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/library_600x900.jpg",
         boxArtFallback: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/header.jpg"
       })
@@ -481,6 +492,7 @@ BarWidget {
       var ageSec = Math.floor(Date.now() / 1000) - cached.fetchedAt
       if (ageSec >= 0 && ageSec < root.descriptionCacheMaxAgeSec) {
         root.setSteamGameField(appid, "description", cached.description || "")
+        root.setSteamGameField(appid, "achievementsStoreNone", !!cached.noAchievements)
         root.setSteamGameField(appid, "descriptionLoaded", true)
         return
       }
@@ -489,9 +501,9 @@ BarWidget {
     fetcher.start()
   }
 
-  function cacheSteamDescription(appid, description) {
+  function cacheSteamDescription(appid, description, noAchievements) {
     var cache = Object.assign({}, root.descriptionCache)
-    cache[appid] = { description: description, fetchedAt: Math.floor(Date.now() / 1000) }
+    cache[appid] = { description: description, noAchievements: !!noAchievements, fetchedAt: Math.floor(Date.now() / 1000) }
     root.descriptionCache = cache
     descriptionCacheFile.setText(JSON.stringify(cache))
   }
@@ -619,8 +631,14 @@ BarWidget {
       required property string appid
 
       function start() {
+        // "categories" alongside "basic" costs nothing extra (one request,
+        // already being made for the description) but recovers a fallback
+        // signal for whether a game has achievements at all, for a game
+        // with zero local achievement-stat cache (never launched/viewed in
+        // Steam, so scripts/steam-achievements.py has nothing to report) --
+        // category id 22 is Valve's own "Steam Achievements" store tag.
         command = ["curl", "-fsS", "--max-time", "6",
-          "https://store.steampowered.com/api/appdetails?appids=" + appid + "&filters=basic&l=english"]
+          "https://store.steampowered.com/api/appdetails?appids=" + appid + "&filters=basic,categories&l=english"]
         running = true
       }
 
@@ -636,8 +654,12 @@ BarWidget {
             // locking in a blank description for a month.
             if (entry && entry.success) {
               var desc = entry.data ? String(entry.data.short_description || "") : ""
+              var categories = (entry.data && Array.isArray(entry.data.categories)) ? entry.data.categories : []
+              var hasAchievementsTag = categories.some(function(c) { return c && c.id === 22 })
+              var noAchievements = !hasAchievementsTag
               root.setSteamGameField(fetchProc.appid, "description", desc)
-              root.cacheSteamDescription(fetchProc.appid, desc)
+              root.setSteamGameField(fetchProc.appid, "achievementsStoreNone", noAchievements)
+              root.cacheSteamDescription(fetchProc.appid, desc, noAchievements)
             }
           } catch (e) {
             // Leave description blank this run; the card still shows name + art.
@@ -1244,12 +1266,15 @@ BarWidget {
               // fill the row, numbers on the right. Steam's own local
               // achievement-stat cache, not the Web API -- see
               // scripts/steam-achievements.py. Omitted entirely for a game
-              // Steam hasn't fetched stats for yet (unknown); a game
-              // confirmed to have no ACHIEVEMENTS-type stats at all shows
-              // "No achievements" instead of a 0/0 bar.
+              // Steam hasn't fetched stats for yet AND whose store page
+              // doesn't positively rule achievements out either (genuinely
+              // unknown); a game confirmed (locally, or via the store's own
+              // category tag as a fallback for a game with no local cache
+              // at all) to have no achievements shows "No achievements"
+              // instead of a 0/0 bar.
               Item {
                 id: achievementRow
-                visible: gameRow.modelData.achievementsLoaded
+                visible: gameRow.modelData.achievementsLoaded || gameRow.modelData.achievementsStoreNone
                 width: parent.width
                 implicitHeight: Style.space(20)
 

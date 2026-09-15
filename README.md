@@ -42,10 +42,17 @@ This plugin gives left-click something worth doing instead: a real launcher.
   stat cache (`~/.local/share/Steam/appcache/stats/UserGameStats*.bin`) — an undocumented but
   fully local, keyless format, decoded by a small dependency-free parser in
   [`scripts/steam-achievements.py`](scripts/steam-achievements.py). No Steam Web API key or
-  public-profile requirement, unlike the official achievements API. A game only shows a bar
+  public-profile requirement, unlike the official achievements API. A game shows a real bar
   once Steam has actually cached stats for it locally (typically after you've viewed its
-  achievements page or played it at least once) — nothing shows for a game with no local
-  stats yet, or one with no achievements at all, rather than a misleading 0/0.
+  achievements page or played it at least once), and an italic "No achievements" instead of a
+  bar for a game confirmed to have none. A game Steam hasn't cached stats for *and* whose
+  achievement status is otherwise unknown shows nothing at all, rather than guessing.
+  For that last "unknown" case specifically, there's a free fallback: the same
+  `store.steampowered.com/api/appdetails` call already made for the description (see below)
+  also requests `categories`, and Valve's own "Steam Achievements" store tag (category id 22)
+  tells us for certain whether a never-launched game has achievements at all, even with zero
+  local stat data — enough to show "No achievements" confidently without ever claiming a
+  count we don't actually have.
 - **Launching** a game shells out to `xdg-open steam://rungameid/<appid>` — the same URI
   scheme Steam's own browser integration uses, so it just asks your already-running Steam
   client to launch it.
