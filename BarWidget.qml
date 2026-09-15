@@ -1249,6 +1249,7 @@ BarWidget {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.steamActiveTab === "installed" && root.steamGamesLoaded && root.steamGames.length > 0
             && root.filteredSteamGames.length === 0 && root.steamSearchQuery.trim() !== ""
           text: "No games match \"" + root.steamSearchQuery.trim() + "\"."
@@ -1539,6 +1540,7 @@ BarWidget {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.steamActiveTab === "notinstalled" && root.steamNotInstalledLoaded && root.steamNotInstalled.length > 0
             && root.filteredSteamNotInstalled.length === 0 && root.steamSearchQuery.trim() !== ""
           text: "No games match \"" + root.steamSearchQuery.trim() + "\"."
