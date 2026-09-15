@@ -3,9 +3,10 @@
 A Steam icon for the Omarchy bar, always visible whether Steam is running, closed, or not
 even installed. Left-click it for a quick-launcher popup: box art, a short blurb and genre
 tags, achievement progress, total playtime, sorted by last-played (a running game always
-floats to the top) — one click to launch. A second tab lists everything you own but haven't
-installed, each with a one-click Install button. Right-click gives you Steam's own native
-context menu as a fallback while Steam is running.
+floats to the top) — one click to launch. A second tab lists everything else you own with
+the same detail — including real playtime/achievement history for something you played
+years ago and later uninstalled — each with a one-click Install button instead. Right-click
+gives you Steam's own native context menu as a fallback while Steam is running.
 
 ![Steam Launcher popup](preview.png)
 
@@ -35,13 +36,19 @@ login, nothing sent anywhere except to Steam's own public CDN/store API for art 
   achievements page), an italic "No achievements" for a game confirmed to have none (either
   locally, or via the store's own category tag for a game with no local cache at all), and
   nothing shown for a game that's genuinely unknown either way.
-- **The "Not installed" tab** lists games you own but haven't installed, each with an Install
-  button (`steam://install/<appid>`, which just asks Steam's own client to handle the
-  download — this plugin never installs anything itself). Names come from Steam's local
-  `appinfo.vdf` cache, decoded by [`scripts/steam-not-installed.py`](scripts/steam-not-installed.py)
+- **The "Not installed" tab** renders with the exact same card as an installed game — box
+  art, description, tags, achievement progress, playtime — just with an Install button
+  (`steam://install/<appid>`, which just asks Steam's own client to handle the download —
+  this plugin never installs anything itself) in place of Launch. Names come from Steam's
+  local `appinfo.vdf` cache, decoded by [`scripts/steam-not-installed.py`](scripts/steam-not-installed.py)
   and validated against every currently-installed game's real name before ever being trusted
-  on an uninstalled one. Loaded once, the first time you switch to that tab — it's real
-  parsing work (a fraction of a second), not worth paying on every popup open.
+  on an uninstalled one; playtime and achievements reuse the same local scripts as the
+  installed list (neither is actually scoped to installed-only, so a game you played for
+  hours years ago and later uninstalled still shows its real history). Loaded once, the
+  first time you switch to that tab. Descriptions/tags for this list specifically go through
+  a 3-at-a-time queue rather than firing one request per game — there can be hundreds of
+  owned-but-uninstalled games, and Steam's store API has rate-limited far lighter use than
+  that during this plugin's own development.
 - **Rescanning** happens in the background, not on every popup open: a cheap check every few
   minutes (a handful of file-modification-time checks, not the real parsing) triggers a full
   rescan only when something's actually changed (a game installed/removed, last-played

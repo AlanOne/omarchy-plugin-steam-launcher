@@ -184,8 +184,21 @@ BarWidget {
   // often enough to justify rescanning every popup open the way the
   // installed list does).
   property var steamNotInstalled: []
+  property var steamNotInstalledPending: null
   property bool steamNotInstalledLoading: false
   property bool steamNotInstalledLoaded: false
+
+  // Descriptions/tags for not-installed games go through a strict
+  // concurrency-limited queue instead of firing one curl process per game
+  // immediately (the installed-games pattern) -- there can be *hundreds* of
+  // owned-but-uninstalled games (537 on this machine), and firing that many
+  // concurrent requests at Steam's store API would very plausibly trigger
+  // the same rate-limiting this exact endpoint has already hit multiple
+  // times this session from far lighter use. Installed games don't need
+  // this: that list is naturally small (tens, not hundreds).
+  property var steamNotInstalledFetchQueue: []
+  property int steamNotInstalledFetchInFlight: 0
+  readonly property int steamNotInstalledFetchConcurrency: 3
 
   // Persisted across shell restarts (the shell process itself restarts far
   // more often than a game's store blurb changes -- suspend/resume can
@@ -410,11 +423,135 @@ BarWidget {
       var appid = line.slice(0, tab).trim()
       var name = line.slice(tab + 1).trim()
       if (!appid || !name) continue
-      games.push({ appid: appid, name: name })
+      // Same shape as an installed game's object (minus disk usage, which
+      // only means something for something actually on disk) so the shared
+      // SteamGameCard component can render either one identically.
+      games.push({
+        appid: appid,
+        name: name,
+        stateFlags: 0,
+        lastPlayed: 0,
+        playtimeMinutes: 0,
+        description: "",
+        descriptionLoaded: false,
+        achievementsUnlocked: 0,
+        achievementsTotal: 0,
+        achievementsLoaded: false,
+        achievementsStoreNone: false,
+        tags: [],
+        boxArt: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/library_600x900.jpg",
+        boxArtFallback: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/header.jpg"
+      })
     }
+    root.steamNotInstalledPending = games
+    // Reuse the same local, free scripts already used for installed games --
+    // neither is scoped to installed-only (see their own module docstrings:
+    // steam-last-played.py reads localconfig.vdf's apps section, which
+    // covers every appid Steam has ever configured, and steam-achievements.py
+    // globs the shared appcache/stats dir, which persists regardless of
+    // current install state) -- so a game played for 40 hours years ago and
+    // since uninstalled still shows its real playtime/achievement history,
+    // at zero extra cost. Run again rather than reusing the installed scan's
+    // already-parsed maps: this tab can be opened long after that scan ran,
+    // and both scripts are cheap, local, sub-second reads.
+    steamNotInstalledLastPlayedProc.command = ["python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.alanone.steam-launcher/scripts/steam-last-played.py"]
+    steamNotInstalledLastPlayedProc.running = true
+  }
+
+  function onSteamNotInstalledLastPlayedListed(raw) {
+    var lastPlayed = {}
+    var playtime = {}
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i]
+      if (!line) continue
+      var parts = line.split("\t")
+      if (parts.length < 2) continue
+      var appid = parts[0].trim()
+      var epoch = parseInt(parts[1], 10)
+      var mins = parts.length > 2 ? parseInt(parts[2], 10) : 0
+      if (appid && !isNaN(epoch)) lastPlayed[appid] = epoch
+      if (appid && !isNaN(mins)) playtime[appid] = mins
+    }
+
+    var games = (root.steamNotInstalledPending || []).map(function(g) {
+      var copy = Object.assign({}, g)
+      copy.lastPlayed = lastPlayed[g.appid] || 0
+      copy.playtimeMinutes = playtime[g.appid] || 0
+      return copy
+    })
+    root.steamNotInstalledPending = null
+    root.steamNotInstalled = games
+    steamNotInstalledAchievementsProc.command = ["python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.alanone.steam-launcher/scripts/steam-achievements.py"]
+    steamNotInstalledAchievementsProc.running = true
+  }
+
+  function onSteamNotInstalledAchievementsListed(raw) {
+    var byAppid = {}
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i]
+      if (!line) continue
+      var parts = line.split("\t")
+      if (parts.length !== 3) continue
+      var appid = parts[0].trim()
+      var unlocked = parseInt(parts[1], 10)
+      var total = parseInt(parts[2], 10)
+      if (!appid || isNaN(unlocked) || isNaN(total) || total < 0) continue
+      byAppid[appid] = { unlocked: unlocked, total: total }
+    }
+
+    var games = root.steamNotInstalled.map(function(g) {
+      var entry = byAppid[g.appid]
+      if (!entry) return g
+      var copy = Object.assign({}, g)
+      copy.achievementsUnlocked = entry.unlocked
+      copy.achievementsTotal = entry.total
+      copy.achievementsLoaded = true
+      return copy
+    })
     root.steamNotInstalled = games
     root.steamNotInstalledLoading = false
     root.steamNotInstalledLoaded = true
+    for (var g = 0; g < games.length; g++) root.queueSteamDescriptionFetch(games[g].appid)
+  }
+
+  function setSteamNotInstalledField(appid, field, value) {
+    var games = root.steamNotInstalled.slice()
+    for (var i = 0; i < games.length; i++) {
+      if (games[i].appid !== appid) continue
+      var updated = Object.assign({}, games[i])
+      updated[field] = value
+      games[i] = updated
+      break
+    }
+    root.steamNotInstalled = games
+  }
+
+  function queueSteamDescriptionFetch(appid) {
+    var cached = root.descriptionCache[appid]
+    if (cached && typeof cached.fetchedAt === "number") {
+      var ageSec = Math.floor(Date.now() / 1000) - cached.fetchedAt
+      if (ageSec >= 0 && ageSec < root.descriptionCacheMaxAgeSec) {
+        root.setSteamNotInstalledField(appid, "description", cached.description || "")
+        root.setSteamNotInstalledField(appid, "achievementsStoreNone", !!cached.noAchievements)
+        root.setSteamNotInstalledField(appid, "tags", Array.isArray(cached.tags) ? cached.tags : [])
+        root.setSteamNotInstalledField(appid, "descriptionLoaded", true)
+        return
+      }
+    }
+    root.steamNotInstalledFetchQueue.push(appid)
+    root.drainSteamNotInstalledFetchQueue()
+  }
+
+  function drainSteamNotInstalledFetchQueue() {
+    while (root.steamNotInstalledFetchInFlight < root.steamNotInstalledFetchConcurrency
+      && root.steamNotInstalledFetchQueue.length > 0) {
+      var appid = root.steamNotInstalledFetchQueue.shift()
+      root.steamNotInstalledFetchInFlight++
+      var fetcher = steamDescriptionFetcher.createObject(root, { appid: appid, forNotInstalled: true })
+      fetcher.start()
+    }
   }
 
   // Doesn't close the popup, unlike launchSteamApp -- browsing and kicking
@@ -683,6 +820,27 @@ BarWidget {
     }
   }
 
+  // Separate Process instances from the installed-list's own
+  // steamLastPlayedProc/steamAchievementsProc, even though they run the
+  // exact same scripts -- this tab can load while the background timer's
+  // installed-list rescan is also in flight, and sharing one Process
+  // between two independent callers would race.
+  Process {
+    id: steamNotInstalledLastPlayedProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.onSteamNotInstalledLastPlayedListed(text)
+    }
+  }
+
+  Process {
+    id: steamNotInstalledAchievementsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.onSteamNotInstalledAchievementsListed(text)
+    }
+  }
+
   // One short-lived curl process per game, fetching Steam's free/keyless
   // appdetails endpoint for a short blurb. Box art comes straight from the
   // CDN via Image.source instead (no API round trip needed for that part).
@@ -692,6 +850,12 @@ BarWidget {
     Process {
       id: fetchProc
       required property string appid
+      // Installed games (a naturally small list) fire immediately, one
+      // process per game, same as always. Not-installed games go through
+      // queueSteamDescriptionFetch's concurrency-limited queue instead --
+      // this flag is just which set of setters/bookkeeping to use on
+      // completion, the curl call itself is identical either way.
+      property bool forNotInstalled: false
 
       function start() {
         // "categories"/"genres" alongside "basic" cost nothing extra (one
@@ -724,15 +888,21 @@ BarWidget {
               var noAchievements = !hasAchievementsTag
               var genres = (entry.data && Array.isArray(entry.data.genres)) ? entry.data.genres : []
               var tags = genres.map(function(g) { return String(g && g.description || "") }).filter(function(t) { return t !== "" }).slice(0, 5)
-              root.setSteamGameField(fetchProc.appid, "description", desc)
-              root.setSteamGameField(fetchProc.appid, "achievementsStoreNone", noAchievements)
-              root.setSteamGameField(fetchProc.appid, "tags", tags)
+              var setField = fetchProc.forNotInstalled ? root.setSteamNotInstalledField : root.setSteamGameField
+              setField(fetchProc.appid, "description", desc)
+              setField(fetchProc.appid, "achievementsStoreNone", noAchievements)
+              setField(fetchProc.appid, "tags", tags)
               root.cacheSteamDescription(fetchProc.appid, desc, noAchievements, tags)
             }
           } catch (e) {
             // Leave description blank this run; the card still shows name + art.
           }
-          root.setSteamGameField(fetchProc.appid, "descriptionLoaded", true)
+          var setLoaded = fetchProc.forNotInstalled ? root.setSteamNotInstalledField : root.setSteamGameField
+          setLoaded(fetchProc.appid, "descriptionLoaded", true)
+          if (fetchProc.forNotInstalled) {
+            root.steamNotInstalledFetchInFlight--
+            root.drainSteamNotInstalledFetchQueue()
+          }
           fetchProc.destroy()
         }
       }
@@ -1018,17 +1188,14 @@ BarWidget {
     // per-item (a uniform row height keeps the "8 visible rows" math simple
     // and correct without per-row variable sizing).
     readonly property int steamRowHeight: Style.space(140)
-    // "Not installed" rows are name + Install button only -- much shorter
-    // than an installed game's 3-sub-row card -- so the "N rows visible"
-    // cap uses whichever row height matches the currently active tab
-    // instead of always sizing for the taller installed-game card.
-    readonly property int steamNotInstalledRowHeight: Style.space(30)
-    readonly property int steamActiveRowHeight: root.steamActiveTab === "installed" ? steamRowHeight : steamNotInstalledRowHeight
+    // Both tabs use the same SteamGameCard row height now that not-installed
+    // entries render with full detail too (box art/description/tags/
+    // achievements), so a single cap covers either tab.
     readonly property int steamVisibleRows: 8
     readonly property int steamHeaderHeight: steamHeaderRow.implicitHeight + steamLauncherColumn.spacing
       + steamTabsRow.implicitHeight + steamLauncherColumn.spacing + steamSearchField.implicitHeight
     readonly property int steamListCapHeight: steamHeaderHeight + steamLauncherColumn.spacing
-      + steamVisibleRows * steamActiveRowHeight + (steamVisibleRows - 1) * steamLauncherColumn.spacing
+      + steamVisibleRows * steamRowHeight + (steamVisibleRows - 1) * steamLauncherColumn.spacing
     contentHeight: steamLauncherPopup.fittedContentHeight(steamLauncherColumn.implicitHeight, steamListCapHeight)
 
     // A library beyond a handful of games would otherwise just grow the
@@ -1264,257 +1431,12 @@ BarWidget {
           // ones -- same reasoning as the not-installed Repeater below.
           model: root.steamActiveTab === "installed" ? root.filteredSteamGames : []
 
-          delegate: Item {
-            id: gameRow
+          delegate: SteamGameCard {
             required property var modelData
-            width: steamLauncherColumn.width
-            implicitHeight: steamLauncherPopup.steamRowHeight
-
-            readonly property bool isRunning: root.isGameRunning(gameRow.modelData.stateFlags)
-            readonly property bool isUpdating: root.isGameUpdating(gameRow.modelData.stateFlags)
-
-            Rectangle {
-              anchors.fill: parent
-              radius: Math.max(2, Style.cornerRadius)
-              color: gameMouse.containsMouse ? Style.hoverFillFor(root.foreground, root.foreground) : "transparent"
-            }
-
-            Column {
-              id: gameColumn
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              anchors.margins: Style.space(6)
-              spacing: Style.space(4)
-
-              // Row 1: name (left), status/recency/playtime (right). Its own
-              // full-width row rather than sharing a column with the box art,
-              // so the description below has real horizontal room.
-              Item {
-                width: parent.width
-                implicitHeight: nameText.implicitHeight
-
-                Text {
-                  id: nameText
-                  textFormat: Text.PlainText
-                  anchors.left: parent.left
-                  anchors.right: statusText.left
-                  anchors.rightMargin: Style.space(6)
-                  text: gameRow.modelData.name
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
-                  elide: Text.ElideRight
-                }
-
-                Text {
-                  id: statusText
-                  textFormat: Text.PlainText
-                  anchors.right: parent.right
-                  text: gameRow.isRunning ? "▶ Playing now"
-                    : gameRow.isUpdating ? "⬇ Updating…"
-                    : root.relativeLastPlayed(gameRow.modelData.lastPlayed) + root.playtimeSuffix(gameRow.modelData.playtimeMinutes)
-                  color: (gameRow.isRunning || gameRow.isUpdating) ? Color.accent : Qt.darker(root.foreground, 1.4)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: gameRow.isRunning || gameRow.isUpdating
-                }
-              }
-
-              // Row 2: box art (left) + description (right), each with the
-              // full row height to itself now that row 1 no longer shares
-              // this column.
-              Item {
-                id: artDescriptionRow
-                width: parent.width
-                implicitHeight: Style.space(84)
-
-                Image {
-                  id: gameArt
-                  // A binding (source: failed ? fallback : boxArt) is cyclic --
-                  // status depends on source, and this would make source depend
-                  // back on status -- Qt flagged it as a binding loop and the two
-                  // URLs oscillated forever for any game lacking library art (e.g.
-                  // Cogs, Toki Tori only ship header.jpg, no library_600x900.jpg).
-                  // A one-shot imperative retry breaks the cycle: the assignment
-                  // in onStatusChanged detaches this from the initial binding.
-                  property bool triedFallback: false
-                  anchors.left: parent.left
-                  anchors.verticalCenter: parent.verticalCenter
-                  width: Style.space(44)
-                  height: Style.space(64)
-                  fillMode: Image.PreserveAspectCrop
-                  asynchronous: true
-                  sourceSize.width: width * Screen.devicePixelRatio
-                  sourceSize.height: height * Screen.devicePixelRatio
-                  source: gameRow.modelData.boxArt
-                  onStatusChanged: {
-                    if (status === Image.Error && !triedFallback) {
-                      triedFallback = true
-                      source = gameRow.modelData.boxArtFallback
-                    }
-                  }
-                }
-
-                // Subtle hover affordance: a play glyph centered on the art,
-                // only while the row is hovered -- the row was already fully
-                // clickable to launch, this just makes that obvious at a
-                // glance. Plain Unicode (not an icon-font codepoint): an
-                // earlier attempt at a Font Awesome glyph here silently
-                // ended up as a genuinely empty string (confirmed via a
-                // byte-level file dump, not just a rendering guess), so this
-                // uses a character that doesn't depend on any particular
-                // icon font's coverage.
-                Rectangle {
-                  visible: gameMouse.containsMouse
-                  anchors.centerIn: gameArt
-                  width: Style.space(22)
-                  height: width
-                  radius: width / 2
-                  color: Qt.rgba(0, 0, 0, 0.55)
-
-                  Text {
-                    anchors.centerIn: parent
-                    anchors.horizontalCenterOffset: 1
-                    text: "▶"
-                    color: "white"
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                }
-
-                Text {
-                  id: descriptionText
-                  textFormat: Text.PlainText
-                  anchors.left: gameArt.right
-                  anchors.leftMargin: Style.space(10)
-                  anchors.right: parent.right
-                  anchors.top: parent.top
-                  anchors.bottom: tagsText.top
-                  verticalAlignment: Text.AlignVCenter
-                  visible: gameRow.modelData.descriptionLoaded
-                  text: gameRow.modelData.description || "No description available."
-                  color: Qt.darker(root.foreground, 1.3)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                  maximumLineCount: 3
-                  elide: Text.ElideRight
-                }
-
-                // Up to 5 genre tags from Steam's own store data, appended
-                // after the description as a distinct muted line rather than
-                // folded into the prose -- same caption styling used
-                // elsewhere in this popup (disk usage, achievement count).
-                Text {
-                  id: tagsText
-                  textFormat: Text.PlainText
-                  anchors.left: gameArt.right
-                  anchors.leftMargin: Style.space(10)
-                  anchors.right: parent.right
-                  anchors.bottom: parent.bottom
-                  height: visible ? implicitHeight : 0
-                  visible: gameRow.modelData.descriptionLoaded && gameRow.modelData.tags.length > 0
-                  text: gameRow.modelData.tags.join(" · ")
-                  color: Qt.darker(root.foreground, 1.6)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.italic: true
-                  elide: Text.ElideRight
-                }
-              }
-
-              // Row 3: achievement progress -- trophy left, bar expanded to
-              // fill the row, numbers on the right. Steam's own local
-              // achievement-stat cache, not the Web API -- see
-              // scripts/steam-achievements.py. Omitted entirely for a game
-              // Steam hasn't fetched stats for yet AND whose store page
-              // doesn't positively rule achievements out either (genuinely
-              // unknown); a game confirmed (locally, or via the store's own
-              // category tag as a fallback for a game with no local cache
-              // at all) to have no achievements shows "No achievements"
-              // instead of a 0/0 bar.
-              Item {
-                id: achievementRow
-                visible: gameRow.modelData.achievementsLoaded || gameRow.modelData.achievementsStoreNone
-                width: parent.width
-                implicitHeight: Style.space(20)
-
-                readonly property bool hasAchievements: gameRow.modelData.achievementsTotal > 0
-                readonly property real fraction: hasAchievements
-                  ? gameRow.modelData.achievementsUnlocked / gameRow.modelData.achievementsTotal
-                  : 0
-
-                Text {
-                  id: trophyIcon
-                  anchors.left: parent.left
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: ""
-                  color: Qt.darker(root.foreground, 1.4)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                Text {
-                  id: noAchievementsLabel
-                  visible: !achievementRow.hasAchievements
-                  textFormat: Text.PlainText
-                  anchors.left: trophyIcon.right
-                  anchors.leftMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "No achievements"
-                  color: Qt.darker(root.foreground, 1.5)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.italic: true
-                }
-
-                Text {
-                  id: achievementLabel
-                  visible: achievementRow.hasAchievements
-                  textFormat: Text.PlainText
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: gameRow.modelData.achievementsUnlocked + "/" + gameRow.modelData.achievementsTotal
-                    + " — " + Math.round(achievementRow.fraction * 100) + "%"
-                  color: Qt.darker(root.foreground, 1.4)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                Rectangle {
-                  id: achievementTrack
-                  visible: achievementRow.hasAchievements
-                  anchors.left: trophyIcon.right
-                  anchors.leftMargin: Style.space(8)
-                  anchors.right: achievementLabel.left
-                  anchors.rightMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                  height: Style.space(6)
-                  radius: height / 2
-                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
-
-                  Rectangle {
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    radius: parent.radius
-                    color: root.foreground
-                    width: Math.max(height, achievementTrack.width * achievementRow.fraction)
-                  }
-                }
-              }
-            }
-
-            MouseArea {
-              id: gameMouse
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onEntered: if (root.bar) root.bar.showTooltip(gameRow, "Launch")
-              onExited: if (root.bar) root.bar.hideTooltip(gameRow)
-              onClicked: root.launchSteamApp(gameRow.modelData.appid)
-            }
+            game: modelData
+            actionTooltip: "Launch"
+            hoverGlyph: "▶"
+            onActivated: root.launchSteamApp(modelData.appid)
           }
         }
 
@@ -1557,56 +1479,270 @@ BarWidget {
           // looking at.
           model: root.steamActiveTab === "notinstalled" ? root.filteredSteamNotInstalled : []
 
-          delegate: Item {
-            id: notInstalledRow
+          delegate: SteamGameCard {
             required property var modelData
-            width: steamLauncherColumn.width
-            implicitHeight: Style.space(30)
-
-            Rectangle {
-              anchors.fill: parent
-              radius: Math.max(2, Style.cornerRadius)
-              color: notInstalledMouse.containsMouse ? Style.hoverFillFor(root.foreground, root.foreground) : "transparent"
-            }
-
-            // Declared before the name/button below so it sits underneath
-            // them in stacking order -- hover highlighting for the row
-            // without stealing the Install button's own clicks.
-            MouseArea {
-              id: notInstalledMouse
-              anchors.fill: parent
-              hoverEnabled: true
-            }
-
-            Text {
-              textFormat: Text.PlainText
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(6)
-              anchors.right: installButton.left
-              anchors.rightMargin: Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
-              text: notInstalledRow.modelData.name
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              elide: Text.ElideRight
-            }
-
-            Button {
-              id: installButton
-              anchors.right: parent.right
-              anchors.rightMargin: Style.space(6)
-              anchors.verticalCenter: parent.verticalCenter
-              text: "Install"
-              foreground: root.foreground
-              horizontalPadding: 8
-              verticalPadding: 3
-              fontSize: Style.font.bodySmall
-              onClicked: root.installSteamApp(notInstalledRow.modelData.appid)
-            }
+            game: modelData
+            actionTooltip: "Install"
+            hoverGlyph: "⬇"
+            onActivated: root.installSteamApp(modelData.appid)
           }
         }
       }
+    }
+  }
+
+  // Shared by both the installed and not-installed game lists so they look
+  // identical (Alan's ask: "let's make the uninstalled games have the same
+  // look with all details as installed games") -- the two Repeaters using
+  // this only differ in which list they iterate and what the action button/
+  // click does (Launch vs Install). Box art, description, tags, and the
+  // achievement bar all come from the same `game` data shape either way --
+  // see onSteamNotInstalledListed/onSteamNotInstalledAchievementsListed for
+  // how a not-installed game's object gets the same fields populated.
+  component SteamGameCard: Item {
+    id: cardRoot
+    required property var game
+    property string actionTooltip: "Launch"
+    property string hoverGlyph: "▶"
+    signal activated()
+
+    width: steamLauncherColumn.width
+    implicitHeight: steamLauncherPopup.steamRowHeight
+
+    readonly property bool isRunning: root.isGameRunning(cardRoot.game.stateFlags)
+    readonly property bool isUpdating: root.isGameUpdating(cardRoot.game.stateFlags)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Math.max(2, Style.cornerRadius)
+      color: cardMouse.containsMouse ? Style.hoverFillFor(root.foreground, root.foreground) : "transparent"
+    }
+
+    Column {
+      id: cardColumn
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.margins: Style.space(6)
+      spacing: Style.space(4)
+
+      // Row 1: name (left), status/recency/playtime (right).
+      Item {
+        width: parent.width
+        implicitHeight: nameText.implicitHeight
+
+        Text {
+          id: nameText
+          textFormat: Text.PlainText
+          anchors.left: parent.left
+          anchors.right: statusText.left
+          anchors.rightMargin: Style.space(6)
+          text: cardRoot.game.name
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          elide: Text.ElideRight
+        }
+
+        Text {
+          id: statusText
+          textFormat: Text.PlainText
+          anchors.right: parent.right
+          text: cardRoot.isRunning ? "▶ Playing now"
+            : cardRoot.isUpdating ? "⬇ Updating…"
+            : root.relativeLastPlayed(cardRoot.game.lastPlayed) + root.playtimeSuffix(cardRoot.game.playtimeMinutes)
+          color: (cardRoot.isRunning || cardRoot.isUpdating) ? Color.accent : Qt.darker(root.foreground, 1.4)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: cardRoot.isRunning || cardRoot.isUpdating
+        }
+      }
+
+      // Row 2: box art (left) + description/tags (right).
+      Item {
+        id: artDescriptionRow
+        width: parent.width
+        implicitHeight: Style.space(84)
+
+        Image {
+          id: gameArt
+          // See the description/tags anchors below for why they pin to
+          // this Image's own top/bottom rather than the row's.
+          property bool triedFallback: false
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          width: Style.space(44)
+          height: Style.space(64)
+          fillMode: Image.PreserveAspectCrop
+          asynchronous: true
+          sourceSize.width: width * Screen.devicePixelRatio
+          sourceSize.height: height * Screen.devicePixelRatio
+          source: cardRoot.game.boxArt
+          onStatusChanged: {
+            if (status === Image.Error && !triedFallback) {
+              triedFallback = true
+              source = cardRoot.game.boxArtFallback
+            }
+          }
+        }
+
+        // Subtle hover affordance: a glyph centered on the art, only while
+        // the row is hovered -- the row was already fully clickable, this
+        // just makes that obvious at a glance. Plain Unicode (not an
+        // icon-font codepoint): an earlier attempt at a Font Awesome glyph
+        // here silently ended up as a genuinely empty string (confirmed via
+        // a byte-level file dump, not just a rendering guess), so this uses
+        // characters that don't depend on any particular icon font's
+        // coverage.
+        Rectangle {
+          visible: cardMouse.containsMouse
+          anchors.centerIn: gameArt
+          width: Style.space(22)
+          height: width
+          radius: width / 2
+          color: Qt.rgba(0, 0, 0, 0.55)
+
+          Text {
+            anchors.centerIn: parent
+            anchors.horizontalCenterOffset: 1
+            text: cardRoot.hoverGlyph
+            color: "white"
+            font.pixelSize: Style.font.bodySmall
+          }
+        }
+
+        // Pinned to the box art's own top edge, not the row's -- gameArt is
+        // vertically centered in this taller row, so anchoring to parent.top
+        // would land a few px above the art's actual top instead of level
+        // with it.
+        Text {
+          id: descriptionText
+          textFormat: Text.PlainText
+          anchors.left: gameArt.right
+          anchors.leftMargin: Style.space(10)
+          anchors.right: parent.right
+          anchors.top: gameArt.top
+          visible: cardRoot.game.descriptionLoaded
+          text: cardRoot.game.description || "No description available."
+          color: Qt.darker(root.foreground, 1.3)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          maximumLineCount: 3
+          elide: Text.ElideRight
+        }
+
+        // Up to 5 genre tags from Steam's own store data. Pinned to the box
+        // art's own bottom edge independently of the description's own
+        // height -- a short description leaves a visible gap above the
+        // tags rather than the two touching.
+        Text {
+          id: tagsText
+          textFormat: Text.PlainText
+          anchors.left: gameArt.right
+          anchors.leftMargin: Style.space(10)
+          anchors.right: parent.right
+          anchors.bottom: gameArt.bottom
+          height: visible ? implicitHeight : 0
+          visible: cardRoot.game.descriptionLoaded && cardRoot.game.tags.length > 0
+          text: cardRoot.game.tags.join(" · ")
+          color: Qt.darker(root.foreground, 1.6)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.italic: true
+          elide: Text.ElideRight
+        }
+      }
+
+      // Row 3: achievement progress -- trophy left, bar expanded to fill
+      // the row, numbers on the right. Steam's own local achievement-stat
+      // cache, not the Web API -- see scripts/steam-achievements.py.
+      // Omitted entirely for a game Steam hasn't fetched stats for yet AND
+      // whose store page doesn't positively rule achievements out either
+      // (genuinely unknown); a game confirmed (locally, or via the store's
+      // own category tag as a fallback for a game with no local cache at
+      // all) to have no achievements shows "No achievements" instead of a
+      // 0/0 bar.
+      Item {
+        id: achievementRow
+        visible: cardRoot.game.achievementsLoaded || cardRoot.game.achievementsStoreNone
+        width: parent.width
+        implicitHeight: Style.space(20)
+
+        readonly property bool hasAchievements: cardRoot.game.achievementsTotal > 0
+        readonly property real fraction: hasAchievements
+          ? cardRoot.game.achievementsUnlocked / cardRoot.game.achievementsTotal
+          : 0
+
+        Text {
+          id: trophyIcon
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          text: ""
+          color: Qt.darker(root.foreground, 1.4)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Text {
+          visible: !achievementRow.hasAchievements
+          textFormat: Text.PlainText
+          anchors.left: trophyIcon.right
+          anchors.leftMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "No achievements"
+          color: Qt.darker(root.foreground, 1.5)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.italic: true
+        }
+
+        Text {
+          id: achievementLabel
+          visible: achievementRow.hasAchievements
+          textFormat: Text.PlainText
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: cardRoot.game.achievementsUnlocked + "/" + cardRoot.game.achievementsTotal
+            + " — " + Math.round(achievementRow.fraction * 100) + "%"
+          color: Qt.darker(root.foreground, 1.4)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        Rectangle {
+          id: achievementTrack
+          visible: achievementRow.hasAchievements
+          anchors.left: trophyIcon.right
+          anchors.leftMargin: Style.space(8)
+          anchors.right: achievementLabel.left
+          anchors.rightMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          height: Style.space(6)
+          radius: height / 2
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+
+          Rectangle {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            radius: parent.radius
+            color: root.foreground
+            width: Math.max(height, achievementTrack.width * achievementRow.fraction)
+          }
+        }
+      }
+    }
+
+    MouseArea {
+      id: cardMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onEntered: if (root.bar) root.bar.showTooltip(cardRoot, cardRoot.actionTooltip)
+      onExited: if (root.bar) root.bar.hideTooltip(cardRoot)
+      onClicked: cardRoot.activated()
     }
   }
 
