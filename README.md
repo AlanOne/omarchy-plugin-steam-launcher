@@ -1,115 +1,67 @@
 # Steam Launcher
 
 A Steam icon for the Omarchy bar, always visible whether Steam is running, closed, or not
-even installed. Left-click it for a quick-launcher popup listing your installed games — box
-art, a short blurb, achievement progress, total playtime, sorted by last-played (a
-currently-running game always floats to the top) — and launch one with a single click. A
-collapsed "Not installed" section lists everything else you own, each with a one-click
-Install button. Right-click still gives you Steam's own native context menu (Store, Library,
-Friends, Settings, Exit) as a fallback while Steam is running.
+even installed. Left-click it for a quick-launcher popup: box art, a short blurb and genre
+tags, achievement progress, total playtime, sorted by last-played (a running game always
+floats to the top) — one click to launch. A second tab lists everything you own but haven't
+installed, each with a one-click Install button. Right-click gives you Steam's own native
+context menu as a fallback while Steam is running.
 
 ![Steam Launcher popup](preview.png)
 
 ## Why this exists
 
-Steam's own Linux tray icon has never implemented the left-click "Activate" call every
-other tray app responds to — confirmed directly over D-Bus, its `Activate()` method is
-simply not wired up. Only its right-click context menu does anything, and that menu carries
-no icons or box art at all (its DBusMenu entries expose nothing but a plain text label).
-This plugin gives left-click something worth doing instead: a real launcher.
+Steam's own Linux tray icon has never implemented the left-click "Activate" call every other
+tray app responds to — confirmed directly over D-Bus, its `Activate()` method simply isn't
+wired up. Only its right-click context menu does anything, and that menu carries no icons or
+box art at all. This plugin gives left-click something worth doing instead: a real launcher.
 
 ## How it works
 
-- **Installed games** come from your local `~/.local/share/Steam/steamapps/appmanifest_*.acf`
-  files (filtered to drop Proton/Steam Linux Runtime/SteamVR compatibility-layer entries
-  that show up alongside real games in the same folder).
-- **Last-played sorting and total playtime** read Steam's own local `localconfig.vdf`
-  (`~/.local/share/Steam/userdata/<your-id>/config/localconfig.vdf`) — a KeyValues/VDF file
-  parsed by a small dependency-free Python script bundled in [`scripts/`](scripts). Nothing
-  is sent anywhere; this is a local file read.
-- **"Playing now" and "Updating…" status** come from the same `StateFlags` bitmask Steam
-  already writes into each game's `appmanifest_<appid>.acf` (a well-established, community-
-  documented set of bits — `AppRunning`, `Downloading`, `UpdateRunning`, etc.) — read fresh
-  on every popup open, no separate polling process. A running game always sorts to the top
-  regardless of when it was last played.
-- **Box art** loads straight from Steam's public, keyless CDN
-  (`cdn.akamai.steamstatic.com/steam/apps/<appid>/library_600x900.jpg`, falling back to
-  `header.jpg` for games that don't ship the taller format).
-- **Descriptions** come from Steam's free, keyless `store.steampowered.com/api/appdetails`
-  endpoint, one request per game, cached locally for 30 days (`cache/steam-descriptions.json`)
-  so it doesn't re-fetch on every popup open or shell restart.
-- **Achievement progress** ("5/10 — 50%" + a bar) is read from Steam's own local binary
-  stat cache (`~/.local/share/Steam/appcache/stats/UserGameStats*.bin`) — an undocumented but
-  fully local, keyless format, decoded by a small dependency-free parser in
-  [`scripts/steam-achievements.py`](scripts/steam-achievements.py). No Steam Web API key or
-  public-profile requirement, unlike the official achievements API. A game shows a real bar
-  once Steam has actually cached stats for it locally (typically after you've viewed its
-  achievements page or played it at least once), and an italic "No achievements" instead of a
-  bar for a game confirmed to have none. A game Steam hasn't cached stats for *and* whose
-  achievement status is otherwise unknown shows nothing at all, rather than guessing.
-  For that last "unknown" case specifically, there's a free fallback: the same
-  `store.steampowered.com/api/appdetails` call already made for the description (see below)
-  also requests `categories`, and Valve's own "Steam Achievements" store tag (category id 22)
-  tells us for certain whether a never-launched game has achievements at all, even with zero
-  local stat data — enough to show "No achievements" confidently without ever claiming a
-  count we don't actually have.
-- **Launching** a game shells out to `xdg-open steam://rungameid/<appid>` — the same URI
-  scheme Steam's own browser integration uses, so it just asks your already-running Steam
-  client to launch it.
-- The Steam icon itself, and the right-click menu, come from the same generic system-tray
-  protocol (StatusNotifierItem/DBusMenu) every tray icon uses — this plugin just recognizes
-  Steam's specifically (by id/title) and gives it its own dedicated left-click behavior.
-- **Disk usage** ("2.6 GB total") sums each installed game's `SizeOnDisk` field, already
-  present in the same `appmanifest_<appid>.acf` files used for the games list — always the
-  full install list's total, regardless of an active search.
-- **Search** filters the list by name as you type, entirely client-side over the
-  already-loaded games (no rescan, no process spawn). The "Installed games (N)" count
-  reflects the filtered results while a search is active.
-- **The "Not installed" section** lists games you own but haven't installed, each with an
-  Install button (`steam://install/<appid>`). Two local, keyless sources, no Web API key:
-  - Which appids you *own* comes from the same `localconfig.vdf` used for last-played/
-    playtime — its `apps` section lists every appid Steam has ever written local per-user
-    config for, which for a long-time account is effectively "owned", going back years.
-  - Names (and enough info to filter out DLC/Tools/Demos/etc., leaving actual games) come
-    from `~/.local/share/Steam/appcache/appinfo.vdf` — Steam's local cache of metadata for
-    every app it's ever loaded a store/library page for. This is a genuinely more involved
-    binary format than the achievement cache's: a fixed header, a sequence of per-app
-    entries, then a shared string table at the end of the file that every app entry's field
-    *names* are looked up in by index (rather than each repeating "name", "type", etc.
-    inline hundreds of times) — decoded by
-    [`scripts/steam-not-installed.py`](scripts/steam-not-installed.py), which also copies
-    the plaintext-VDF parser from `steam-last-played.py` (these scripts intentionally don't
-    import each other) to get the owned-appid list. Validated against ground truth before
-    being trusted: it correctly recovers the real names of every currently-installed game
-    tested against it before ever being pointed at an owned-but-not-installed one.
-  - Collapsed and unscanned by default — parsing a multi-megabyte file is real work (~0.25s
-    on this machine) compared to everything else this popup does, and most popup opens are
-    "launch something already installed," so it's not worth paying that cost on every open
-    the way the (sub-millisecond) installed-games rescan is. Loaded once on first expand,
-    kept for the rest of the session.
+Everything here is a local file read or a free, keyless request — no Steam Web API key, no
+login, nothing sent anywhere except to Steam's own public CDN/store API for art and blurbs.
 
-**Two Quickshell/Steam quirks this plugin works around**, worth knowing if you're reading
-the source:
+- **Installed games** come from `~/.local/share/Steam/steamapps/appmanifest_*.acf` (filtered
+  to drop Proton/runtime/SteamVR compatibility entries that live in the same folder).
+- **Last-played, playtime, and "Playing now"/"Updating…" status** come from Steam's own
+  `localconfig.vdf` and each game's `StateFlags` bitmask — both already-local, already-yours
+  data Steam maintains itself. A running game always sorts to the top.
+- **Box art** loads straight from Steam's public CDN, falling back to a smaller image for
+  games that don't ship the taller format.
+- **Descriptions, genre tags, and achievement fallback** come from one request per game to
+  Steam's free `store.steampowered.com/api/appdetails` endpoint, cached 30 days.
+- **Achievement progress** is read from Steam's own local achievement-stat cache — a real bar
+  once Steam has cached stats for a game (typically after playing it or viewing its
+  achievements page), an italic "No achievements" for a game confirmed to have none (either
+  locally, or via the store's own category tag for a game with no local cache at all), and
+  nothing shown for a game that's genuinely unknown either way.
+- **The "Not installed" tab** lists games you own but haven't installed, each with an Install
+  button (`steam://install/<appid>`, which just asks Steam's own client to handle the
+  download — this plugin never installs anything itself). Names come from Steam's local
+  `appinfo.vdf` cache, decoded by [`scripts/steam-not-installed.py`](scripts/steam-not-installed.py)
+  and validated against every currently-installed game's real name before ever being trusted
+  on an uninstalled one. Loaded once, the first time you switch to that tab — it's real
+  parsing work (a fraction of a second), not worth paying on every popup open.
+- **Rescanning** happens in the background, not on every popup open: a cheap check every few
+  minutes (a handful of file-modification-time checks, not the real parsing) triggers a full
+  rescan only when something's actually changed (a game installed/removed, last-played
+  updated), with a several-hour fallback so it never goes stale even if a change is somehow
+  missed. Opening the popup just shows whatever's already loaded — instantly, no waiting.
+- The icon and right-click menu use the same StatusNotifierItem/DBusMenu protocol every tray
+  icon uses; this plugin just recognizes Steam's specifically and gives it its own left-click.
 
-1. Steam reports its tray icon as `image://icon/steam_tray_mono?path=<dir>`, where the
-   `?path=` is meant as a fallback search directory for icons that live outside a standard
-   icon theme (Steam ships its tray icon in its own flat install folder). Quickshell's
-   `image://icon/` provider does not actually honor that hint — it silently resolves to
-   Steam's unrelated full-color application icon instead. This plugin parses that `?path=`
-   query itself and loads the real file directly, bypassing the icon provider entirely for
-   icons that carry this hint.
-2. Steam's tray icon file (`steam_tray_mono.png`) follows Valve's own `_mono` naming
-   convention for "please recolor this to match my theme," rather than freedesktop's more
-   common `-symbolic` suffix. This plugin's icon-recoloring check recognizes both.
+Two Quickshell/Steam quirks worth knowing if you're reading the source (see the code comments
+in `BarWidget.qml` for the full detail): Quickshell's icon loader doesn't actually honor the
+`?path=` hint Steam's tray icon reports, so this plugin reads that file directly; and Steam's
+tray icon uses Valve's own `_mono` naming convention (not freedesktop's `-symbolic`) for "please
+recolor this," which this plugin's icon-tinting also recognizes.
 
 ## Prerequisites
 
 - **Steam**, installed and already handling `steam://` URIs (true by default on any
-  standard Steam-for-Linux install — this is how Steam registers itself with `xdg-open`).
-- **`curl`** — used for the description fetch. Present by default on virtually every Linux
-  install, including Omarchy.
-- **`python3`** — used for the local last-played and achievement VDF parsing. Present by
-  default on Omarchy.
+  standard Steam-for-Linux install).
+- **`curl`** and **`python3`** — used for the description fetch and local VDF/binary parsing.
+  Both present by default on Omarchy.
 
 ## Install
 
@@ -119,30 +71,17 @@ omarchy plugin add https://github.com/AlanOne/omarchy-plugin-steam-launcher.git 
 
 ## Usage
 
-- **Left-click** the Steam icon: opens the quick-launcher. Click any game to launch it.
-  **Library**, **Big Picture**, and **VR** buttons sit next to the title, with an
-  "Installed games (N)" count and total disk usage below them, and a search box below that
-  to filter by name. The list shows up to 8 games before scrolling; hovering a game shows a
-  small play button on its box art as a launch affordance (the whole row is clickable either
-  way). A game currently running shows "▶ Playing now" instead of its last-played time and
-  sorts above everything else; one actively downloading/updating shows "⬇ Updating…". Below
-  the installed list, a collapsed "▸ Not installed" section expands (on first click, loading
-  the list) into everything else you own, each with its own Install button.
-- **Right-click**: Steam's own native context menu (Store, Library, Community, Friends,
-  Settings, Big Picture, SteamVR, Exit Steam) — submenus (e.g. the "recently played" list
-  some Steam versions show here) work too, rendered inline rather than as a native platform
-  menu Quickshell can't otherwise display. Only available while Steam is actually running
-  (there's no menu to forward to otherwise); does nothing on a right-click when it's not.
-- **Middle-click**: forwards to Steam's `SecondaryActivate` (whatever Steam itself maps
-  that to). Same caveat — only while Steam is running.
-- **The icon is always visible**, whether Steam is running, closed, or not installed at
-  all — left-click, the games list, box art, and launching all work identically whether
-  Steam is currently running or not (everything reads local files or uses `steam://` URIs,
-  which launch Steam automatically if it isn't already running). Only when Steam isn't
-  *installed* does the popup show "Steam is not installed on this machine." with an empty
-  list instead. The icon itself falls back the same way: Steam's real tray icon while
-  running, the same icon file read directly from disk while closed, and a plain 🎮 emoji
-  if Steam isn't installed at all.
+- **Left-click** the Steam icon to open the launcher. **Installed games** and **Not
+  installed** tabs sit below the title row; clicking a tab switches the list and re-scopes
+  the search box to it. Click any installed game to launch it, or click Install on an
+  uninstalled one. The list shows up to 8 rows before scrolling.
+- **Right-click** gives Steam's own native context menu (Store, Library, Friends, Settings,
+  Exit, etc.) — only available while Steam is actually running.
+- **Middle-click** forwards to Steam's own `SecondaryActivate`, same caveat.
+- The icon is always visible. Everything works the same whether Steam is running or closed;
+  only when Steam isn't *installed* does the popup show that explicitly instead of a games
+  list. The icon itself falls back the same way: Steam's real icon while running, the same
+  file read directly from disk while closed, a plain glyph if Steam isn't installed at all.
 
 Move the widget's position in the bar:
 
@@ -158,36 +97,34 @@ omarchy plugin remove io.github.alanone.steam-launcher
 
 ## Security
 
-- Runs three external processes: `xdg-open` (to hand `steam://` URIs to Steam), `curl` (to
-  fetch a game's public store description), and `python3` (to parse local Steam files — last
-  played time and achievement stats). Nothing else.
-- The only network calls are to Steam's own CDN (box art) and store API (descriptions) —
-  both public, keyless, read-only endpoints. No credentials are used or stored anywhere.
-- Reads local files that are entirely yours already (`appmanifest_*.acf`, `localconfig.vdf`,
-  the local achievement stat cache under `appcache/stats/`, and `appcache/appinfo.vdf` for
-  the "Not installed" section) — nothing here is sent anywhere, they're only used to build
-  the local games list, sort order, achievement progress, and owned-but-not-installed list.
-- Clicking "Install" only ever hands Steam a `steam://install/<appid>` URI and lets Steam's
-  own client handle the rest (its own confirmation, download, disk space check, etc.) — this
-  plugin never downloads or installs anything itself.
+- Runs three external processes: `xdg-open` (for `steam://` URIs), `curl` (Steam's public
+  store API), and `python3` (local file parsing). Nothing else.
+- The only network calls are to Steam's own CDN and store API — both public, keyless,
+  read-only. No credentials are used or stored anywhere.
+- Reads local files that are already entirely yours (`appmanifest_*.acf`, `localconfig.vdf`,
+  the achievement stat cache, `appinfo.vdf`) — used only to build what's shown in the popup,
+  never sent anywhere.
+- Install only ever hands Steam a `steam://install/<appid>` URI and lets Steam's own client
+  handle the rest.
 
 ## Troubleshooting
 
 - **Icon never appears**: it's always visible regardless of Steam's state, so this points at
-  the plugin itself rather than Steam — check `omarchy restart shell` output for errors.
+  the plugin itself — check `omarchy restart shell` output for errors.
 - **A game shows "No description available."**: Steam's store API occasionally rate-limits
-  (a normal, temporary condition under heavy use) — it'll pick up the description next time
-  the cache entry is due to refresh, or immediately for a game that hasn't been fetched yet.
-- **Box art missing for one game**: not every game has a `library_600x900.jpg` on Steam's
-  CDN — this plugin falls back to `header.jpg` automatically; if neither exists for a given
-  game, the slot stays blank rather than showing a broken-image icon.
+  under heavy use — it'll pick up the description next time the cache entry is due to refresh.
+- **Box art missing for one game**: not every game has the taller CDN image; this plugin
+  falls back automatically, and leaves the slot blank rather than showing a broken image if
+  neither exists.
 - **No achievement bar for a game that has achievements**: Steam only writes its local stat
-  cache for a game after you've opened that game's achievements page or played it at least
-  once in the client — a freshly installed, never-touched game won't have one yet. Play it
-  or check its achievements in Steam once, then reopen the popup.
+  cache after you've opened that game's achievements page or played it at least once — play
+  it or check its achievements in Steam once, then reopen the popup.
+- **A change (new install, new achievement) doesn't show up immediately**: the popup shows
+  whatever was loaded by the last background scan, not a live view — reopening it a few
+  minutes later, or after actually using the game in question, should pick it up (see "How it
+  works" above for the actual cadence).
 - **Bar icon doesn't theme correctly after an update**: run
-  `omarchy-shell shell rescanPlugins`; if that doesn't pick up a change, a full
-  `omarchy restart shell` will.
+  `omarchy-shell shell rescanPlugins`; if that doesn't pick it up, `omarchy restart shell` will.
 
 ## License
 
