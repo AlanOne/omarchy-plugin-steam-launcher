@@ -188,6 +188,14 @@ BarWidget {
   property bool steamNotInstalledLoading: false
   property bool steamNotInstalledLoaded: false
 
+  // Persisted to disk (not just in-memory-for-the-session): parsing
+  // appinfo.vdf plus the last-played/achievements scans is real work
+  // (~0.25s+) worth skipping entirely on a cache hit, not just avoiding a
+  // second parse within the same shell session. Ownership/names change
+  // rarely; a day-old cache is still accurate almost all the time.
+  property var steamNotInstalledCache: ({})
+  readonly property int steamNotInstalledCacheMaxAgeSec: 24 * 60 * 60
+
   // Descriptions/tags for not-installed games go through a strict
   // concurrency-limited queue instead of firing one curl process per game
   // immediately (the installed-games pattern) -- there can be *hundreds* of
@@ -407,9 +415,67 @@ BarWidget {
 
   function loadSteamNotInstalled() {
     if (steamNotInstalledLoaded || steamNotInstalledLoading) return
+
+    var cache = root.steamNotInstalledCache
+    var ageSec = (cache && typeof cache.generatedAt === "number")
+      ? Math.floor(Date.now() / 1000) - cache.generatedAt : -1
+    if (ageSec >= 0 && ageSec < root.steamNotInstalledCacheMaxAgeSec && cache.games) {
+      var games = []
+      for (var appid in cache.games) {
+        var g = cache.games[appid]
+        games.push({
+          appid: appid,
+          name: g.name,
+          stateFlags: 0,
+          lastPlayed: g.lastPlayed || 0,
+          playtimeMinutes: g.playtimeMinutes || 0,
+          description: "",
+          descriptionLoaded: false,
+          achievementsUnlocked: g.achievementsUnlocked || 0,
+          achievementsTotal: g.achievementsTotal || 0,
+          achievementsLoaded: !!g.achievementsLoaded,
+          achievementsStoreNone: false,
+          tags: [],
+          boxArt: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/library_600x900.jpg",
+          boxArtFallback: "https://cdn.akamai.steamstatic.com/steam/apps/" + appid + "/header.jpg"
+        })
+      }
+      root.steamNotInstalled = games
+      root.steamNotInstalledLoaded = true
+      for (var i = 0; i < games.length; i++) root.queueSteamDescriptionFetch(games[i].appid)
+      return
+    }
+
     steamNotInstalledLoading = true
     steamNotInstalledProc.command = ["python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.alanone.steam-launcher/scripts/steam-not-installed.py"]
     steamNotInstalledProc.running = true
+  }
+
+  function cacheSteamNotInstalled(games) {
+    var byAppid = {}
+    for (var i = 0; i < games.length; i++) {
+      var g = games[i]
+      byAppid[g.appid] = {
+        name: g.name,
+        lastPlayed: g.lastPlayed,
+        playtimeMinutes: g.playtimeMinutes,
+        achievementsUnlocked: g.achievementsUnlocked,
+        achievementsTotal: g.achievementsTotal,
+        achievementsLoaded: g.achievementsLoaded
+      }
+    }
+    var cache = { generatedAt: Math.floor(Date.now() / 1000), games: byAppid }
+    root.steamNotInstalledCache = cache
+    notInstalledCacheFile.setText(JSON.stringify(cache))
+  }
+
+  function onNotInstalledCacheLoaded(raw) {
+    try {
+      var parsed = JSON.parse(raw)
+      root.steamNotInstalledCache = (parsed && typeof parsed === "object" && !Array.isArray(parsed)) ? parsed : {}
+    } catch (e) {
+      root.steamNotInstalledCache = {}
+    }
   }
 
   function onSteamNotInstalledListed(raw) {
@@ -513,6 +579,7 @@ BarWidget {
     root.steamNotInstalled = games
     root.steamNotInstalledLoading = false
     root.steamNotInstalledLoaded = true
+    root.cacheSteamNotInstalled(games)
     for (var g = 0; g < games.length; g++) root.queueSteamDescriptionFetch(games[g].appid)
   }
 
@@ -545,8 +612,23 @@ BarWidget {
   }
 
   function drainSteamNotInstalledFetchQueue() {
+    // Under correct operation this loop body runs at most
+    // steamNotInstalledFetchConcurrency times per call (inFlight rises by 1
+    // each iteration until it hits the cap) -- this hard stop is a
+    // defensive backstop, not the expected path, in case inFlight and the
+    // queue ever desync (confirmed elsewhere this session: a *different*
+    // bug -- writing a cache file inside the watched plugin directory --
+    // caused a full widget reload-and-reset storm that looked like this
+    // loop running away; that root cause is fixed separately, but a hard
+    // cap here costs nothing and prevents any future desync from ever
+    // being able to spin unbounded again).
+    var guard = 0
     while (root.steamNotInstalledFetchInFlight < root.steamNotInstalledFetchConcurrency
       && root.steamNotInstalledFetchQueue.length > 0) {
+      if (++guard > root.steamNotInstalledFetchConcurrency * 2) {
+        console.warn("drainSteamNotInstalledFetchQueue: stopped after " + guard + " iterations in one call -- inFlight/queue may be desynced (inFlight=" + root.steamNotInstalledFetchInFlight + " queueLen=" + root.steamNotInstalledFetchQueue.length + ")")
+        break
+      }
       var appid = root.steamNotInstalledFetchQueue.shift()
       root.steamNotInstalledFetchInFlight++
       var fetcher = steamDescriptionFetcher.createObject(root, { appid: appid, forNotInstalled: true })
@@ -779,13 +861,36 @@ BarWidget {
     return name.slice(-9) === "-symbolic" || name.slice(-5) === "_mono"
   }
 
+  // ~/.cache, NOT anywhere under the plugin's own ~/.config/omarchy/plugins/
+  // directory -- root-caused a severe bug: quickshell watches a plugin's
+  // own directory for hot-reload, and writing this file *inside* it (as an
+  // earlier version of this plugin did) tripped that watcher on every
+  // write. With the not-installed tab's few-hundred description fetches
+  // each writing this file individually, that produced a self-sustaining
+  // storm: write -> "plugin changed, reloading" -> full widget teardown
+  // and reinit -> reset state re-triggers the whole not-installed fetch
+  // pipeline from scratch -> writes again -> reloads again, forever,
+  // consuming memory and CPU without bound each cycle. Confirmed live on
+  // this machine: quickshell hit 9.8GB RSS and had to be force-killed
+  // twice before this was found and fixed.
+  readonly property string cacheDir: Quickshell.env("HOME") + "/.cache/omarchy-steam-launcher"
+
   FileView {
     id: descriptionCacheFile
-    path: Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.alanone.steam-launcher/cache/steam-descriptions.json"
+    path: root.cacheDir + "/steam-descriptions.json"
     atomicWrites: true
     printErrors: false
     onLoaded: root.onDescriptionCacheLoaded(text())
     onLoadFailed: root.onDescriptionCacheLoaded("{}")
+  }
+
+  FileView {
+    id: notInstalledCacheFile
+    path: root.cacheDir + "/not-installed.json"
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.onNotInstalledCacheLoaded(text())
+    onLoadFailed: root.onNotInstalledCacheLoaded("{}")
   }
 
   Process {
@@ -1472,12 +1577,36 @@ BarWidget {
           font.italic: true
         }
 
-        Repeater {
-          // Zero delegates while the other tab is active, not just hidden
-          // ones -- with 500+ owned-but-uninstalled games common for a
-          // long-time account, there's no reason to pay for rows nobody's
-          // looking at.
+        // ListView, not Repeater: a Repeater instantiates every delegate for
+        // every model item immediately regardless of scroll position -- with
+        // 500+ owned-but-uninstalled games common for a long-time account,
+        // that meant 500+ live SteamGameCards each independently loading its
+        // own box art the instant this tab opened. Confirmed the hard way on
+        // this machine: quickshell's memory climbed past 8GB and had to be
+        // force-killed. ListView only realizes delegates actually within (or
+        // just outside, via cacheBuffer) the visible viewport, so opening
+        // this tab now only ever loads box art for a handful of rows at a
+        // time no matter how large the owned library is. Height is capped
+        // to the same "N visible rows" budget as the installed list, with
+        // its own internal scroll for the rest -- the outer popup Flickable
+        // barely needs to scroll for this tab anymore since this block's
+        // height no longer grows with the model size.
+        ListView {
+          id: notInstalledListView
+          visible: root.steamActiveTab === "notinstalled"
+          width: steamLauncherColumn.width
+          height: {
+            if (!visible || count === 0) return 0
+            var rows = Math.min(steamLauncherPopup.steamVisibleRows, count)
+            return rows * steamLauncherPopup.steamRowHeight + (rows - 1) * spacing
+          }
+          spacing: Style.space(10)
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          cacheBuffer: steamLauncherPopup.steamRowHeight * 4
           model: root.steamActiveTab === "notinstalled" ? root.filteredSteamNotInstalled : []
+
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
           delegate: SteamGameCard {
             required property var modelData
