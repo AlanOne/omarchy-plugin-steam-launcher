@@ -883,7 +883,7 @@ BarWidget {
 
         Text {
           id: steamSectionLabel
-          text: "Installed games"
+          text: "Installed games (" + root.steamGames.length + ")"
           color: Qt.darker(root.foreground, 1.3)
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
