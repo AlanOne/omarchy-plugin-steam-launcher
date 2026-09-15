@@ -7,14 +7,18 @@ import Quickshell.Services.SystemTray
 import qs.Commons
 import qs.Ui
 
-// Steam quick-launcher: a single bar icon that only appears while Steam is
-// running (detected via its own StatusNotifierItem), replacing Steam's own
-// left-click (which its Linux client never implements -- confirmed via
+// Steam quick-launcher: a single, always-visible bar icon replacing Steam's
+// own left-click (which its Linux client never implements -- confirmed via
 // D-Bus, only its right-click context menu works) with a popup listing your
 // installed games -- box art + blurb from Steam's free/keyless CDN and
 // store API, sorted by last-played (from Steam's own local play-history
 // file), one click to launch. Right-click still gives Steam's real native
-// menu (Store/Library/Friends/Settings/Exit) as a fallback.
+// menu (Store/Library/Friends/Settings/Exit) as a fallback, when Steam is
+// actually running to provide one. The icon and popup work identically
+// whether Steam is running or not (all data comes from local files and
+// steam:// URIs that launch Steam if needed); only when Steam isn't
+// installed at all does the popup show an explanatory empty state instead
+// of a games list.
 BarWidget {
   id: root
   moduleName: "io.github.alanone.steam-launcher"
@@ -46,9 +50,34 @@ BarWidget {
     return null
   }
 
-  visible: root.steamItem !== null
+  // Always visible now, regardless of whether Steam is installed or
+  // running -- Alan's call: a missing/not-yet-running Steam should still
+  // show the icon and explain itself in the popup, rather than the icon
+  // just not being there with no explanation. Steam being *running* only
+  // changes where the icon image and native right-click menu come from
+  // (see steamItem/steamInstalled below); the games list, launching, etc.
+  // all come from local files and steam:// URIs that work either way.
+  visible: true
   implicitWidth: root.trayItemExtent
   implicitHeight: root.trayItemExtent
+
+  // Checked once at startup (installing/uninstalling Steam itself isn't
+  // something that happens mid-session) against the same two locations
+  // scripts/list-installed-games.sh already globs -- a plain directory
+  // check, not a games count, so "installed with zero games" and "not
+  // installed" are distinguishable. Defaults optimistic (true) so a slow
+  // check doesn't flash a wrong "not installed" message before it resolves.
+  property bool steamInstalled: true
+
+  Process {
+    id: steamInstalledCheckProc
+    command: ["bash", "-c", "test -d \"$HOME/.local/share/Steam\" -o -d \"$HOME/.steam/steam\" && echo yes || echo no"]
+    running: true
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.steamInstalled = text.trim() === "yes"
+    }
+  }
 
   property bool trayMenuOpen: false
   property var activeTrayItem: null
@@ -979,7 +1008,7 @@ BarWidget {
 
         Text {
           visible: root.steamGamesLoaded && root.steamGames.length === 0
-          text: "No installed games found."
+          text: root.steamInstalled ? "No installed games found." : "Steam is not installed on this machine."
           color: Qt.darker(root.foreground, 1.5)
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -1216,8 +1245,16 @@ BarWidget {
   // disappears against a matching background otherwise).
   component TrayIcon: Item {
     id: trayIconRoot
-    required property var icon
-    readonly property bool symbolic: root.iconIsSymbolic(icon)
+    // Null (not required) now: Steam might not be running, in which case
+    // there's no live SNI icon at all. fallbackFile covers "installed but
+    // closed" (the same steam_tray_mono.png Steam ships still sits on disk
+    // whether or not the client is currently running); when neither is
+    // available (Steam genuinely not installed) the plain-text glyph below
+    // is the last resort.
+    property var icon: null
+    property string fallbackFile: ""
+    readonly property bool hasImage: !!icon || !!fallbackFile
+    readonly property bool symbolic: icon ? root.iconIsSymbolic(icon) : true
 
     Image {
       id: trayIconImage
@@ -1227,18 +1264,28 @@ BarWidget {
       // which leaves PNG icons upscaled and blurry on HiDPI displays.
       sourceSize.width: Math.round(Math.min(width, height) * Screen.devicePixelRatio)
       sourceSize.height: Math.round(Math.min(width, height) * Screen.devicePixelRatio)
-      source: root.trayIconSource(trayIconRoot.icon)
+      source: trayIconRoot.icon ? root.trayIconSource(trayIconRoot.icon)
+        : trayIconRoot.fallbackFile ? "file://" + trayIconRoot.fallbackFile : ""
       // Kept as a hidden layer so the effect can sample it as a texture.
-      visible: !trayIconRoot.symbolic
-      layer.enabled: trayIconRoot.symbolic
+      visible: trayIconRoot.hasImage && !trayIconRoot.symbolic
+      layer.enabled: trayIconRoot.hasImage && trayIconRoot.symbolic
     }
 
     MultiEffect {
       anchors.fill: trayIconImage
       source: trayIconImage
-      visible: trayIconRoot.symbolic
+      visible: trayIconRoot.hasImage && trayIconRoot.symbolic
       colorization: 1.0
       colorizationColor: root.foreground
+    }
+
+    // Steam genuinely not installed: no live SNI icon, no local asset file
+    // to fall back to either. A plain emoji glyph beats rendering nothing.
+    Text {
+      anchors.centerIn: parent
+      visible: !trayIconRoot.hasImage
+      text: "🎮"
+      font.pixelSize: parent.height * 0.85
     }
   }
 
@@ -1253,7 +1300,9 @@ BarWidget {
     // seems a bit off... maybe it's too small compared to other ones".
     width: Style.bar.iconCanvas
     height: Style.bar.iconCanvas
-    icon: root.steamItem ? root.steamItem.icon : ""
+    icon: root.steamItem ? root.steamItem.icon : null
+    fallbackFile: (!root.steamItem && root.steamInstalled)
+      ? (Quickshell.env("HOME") + "/.local/share/Steam/public/steam_tray_mono.png") : ""
   }
 
   MouseArea {
@@ -1262,20 +1311,26 @@ BarWidget {
     acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
     hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
-    onEntered: if (root.bar) root.bar.showTooltip(root, root.trayTooltip(root.steamItem))
+    onEntered: if (root.bar) root.bar.showTooltip(root, root.trayTooltip(root.steamItem) || "Steam Launcher")
     onExited: if (root.bar) root.bar.hideTooltip(root)
     onPressed: function(mouse) {
-      if (mouse.button === Qt.RightButton) {
+      // No-op when Steam isn't running: openTrayMenu already guards on a
+      // null item, and there's no live DBusMenu to show without one.
+      if (mouse.button === Qt.RightButton && root.steamItem) {
         root.openTrayMenu(root.steamItem, root, mouse)
         mouse.accepted = true
       }
     }
     onClicked: function(mouse) {
-      if (!root.steamItem) return
+      // Left-click always opens the launcher regardless of whether Steam
+      // is currently running -- the popup's own content (games list,
+      // launching via steam:// URIs) doesn't need Steam's tray item at
+      // all, only right-click/middle-click (Steam's own live menu and
+      // SecondaryActivate) genuinely require it to exist.
       if (mouse.button === Qt.RightButton) {
         mouse.accepted = true
       } else if (mouse.button === Qt.MiddleButton) {
-        root.steamItem.secondaryActivate()
+        if (root.steamItem) root.steamItem.secondaryActivate()
       } else if (root.steamPopupOpen) {
         // Toggle closed on a second click rather than re-opening (which
         // used to just re-run the same open logic and re-show the popup

@@ -98,11 +98,18 @@ omarchy plugin add https://github.com/AlanOne/omarchy-plugin-steam-launcher.git 
 - **Right-click**: Steam's own native context menu (Store, Library, Community, Friends,
   Settings, Big Picture, SteamVR, Exit Steam) — submenus (e.g. the "recently played" list
   some Steam versions show here) work too, rendered inline rather than as a native platform
-  menu Quickshell can't otherwise display.
+  menu Quickshell can't otherwise display. Only available while Steam is actually running
+  (there's no menu to forward to otherwise); does nothing on a right-click when it's not.
 - **Middle-click**: forwards to Steam's `SecondaryActivate` (whatever Steam itself maps
-  that to).
-- The icon only appears while Steam is actually running — nothing shows in the bar
-  otherwise.
+  that to). Same caveat — only while Steam is running.
+- **The icon is always visible**, whether Steam is running, closed, or not installed at
+  all — left-click, the games list, box art, and launching all work identically whether
+  Steam is currently running or not (everything reads local files or uses `steam://` URIs,
+  which launch Steam automatically if it isn't already running). Only when Steam isn't
+  *installed* does the popup show "Steam is not installed on this machine." with an empty
+  list instead. The icon itself falls back the same way: Steam's real tray icon while
+  running, the same icon file read directly from disk while closed, and a plain 🎮 emoji
+  if Steam isn't installed at all.
 
 Move the widget's position in the bar:
 
@@ -130,9 +137,8 @@ omarchy plugin remove io.github.alanone.steam-launcher
 
 ## Troubleshooting
 
-- **Icon never appears**: it only shows while Steam is running — start Steam first. If it
-  still doesn't appear, confirm Steam is actually registering a tray icon (some minimized-
-  to-tray settings in Steam itself control this).
+- **Icon never appears**: it's always visible regardless of Steam's state, so this points at
+  the plugin itself rather than Steam — check `omarchy restart shell` output for errors.
 - **A game shows "No description available."**: Steam's store API occasionally rate-limits
   (a normal, temporary condition under heavy use) — it'll pick up the description next time
   the cache entry is due to refresh, or immediately for a game that hasn't been fetched yet.
