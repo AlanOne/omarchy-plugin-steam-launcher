@@ -1244,8 +1244,15 @@ BarWidget {
 
   TrayIcon {
     anchors.centerIn: parent
-    width: Style.space(12)
-    height: Style.space(12)
+    // Style.space(12) was the generic multi-icon system-tray convention
+    // (icon.qml/Tray.qml uses it for a drawer full of small SNI pixmaps).
+    // This plugin is a single dedicated bar icon now, not a tray drawer, so
+    // it should match the "optical canvas" size every other dedicated
+    // bar-widget icon uses (BarIconButton's opticalSize) rather than
+    // looking undersized next to them -- Alan: "the plugin icon still
+    // seems a bit off... maybe it's too small compared to other ones".
+    width: Style.bar.iconCanvas
+    height: Style.bar.iconCanvas
     icon: root.steamItem ? root.steamItem.icon : ""
   }
 
@@ -1269,6 +1276,11 @@ BarWidget {
         mouse.accepted = true
       } else if (mouse.button === Qt.MiddleButton) {
         root.steamItem.secondaryActivate()
+      } else if (root.steamPopupOpen) {
+        // Toggle closed on a second click rather than re-opening (which
+        // used to just re-run the same open logic and re-show the popup
+        // that was already showing -- never actually closing it).
+        root.close()
       } else {
         // Steam's tray icon never implements the SNI Activate() call
         // left-click sends, and its own context menu carries no icons or
