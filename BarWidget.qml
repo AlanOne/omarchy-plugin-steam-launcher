@@ -1001,7 +1001,12 @@ BarWidget {
         // nothing to report) -- category id 22 is Valve's own "Steam
         // Achievements" store tag. genres gives up to 5 tags to show under
         // the description (e.g. "Action, Indie, Strategy").
-        command = ["curl", "-fsS", "--max-time", "6",
+        // --max-filesize caps the response at the curl level (independent of
+        // any Content-Length header) before it's buffered whole into QML
+        // memory by StdioCollector below -- a real appdetails response is a
+        // few KB, so 2 MiB leaves generous headroom while still bounding
+        // what a compromised/misbehaving endpoint could hand back.
+        command = ["curl", "-fsS", "--max-time", "6", "--max-filesize", "2097152",
           "https://store.steampowered.com/api/appdetails?appids=" + appid + "&filters=basic,categories,genres&l=english"]
         running = true
       }
