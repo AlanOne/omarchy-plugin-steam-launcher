@@ -1643,7 +1643,7 @@ BarWidget {
             required property var modelData
             game: modelData
             actionTooltip: "Install"
-            hoverGlyph: "⬇"
+            hoverGlyph: ""
             showActionButton: true
             onActivated: root.installSteamApp(modelData.appid)
           }
@@ -1776,12 +1776,7 @@ BarWidget {
 
         // Subtle hover affordance: a glyph centered on the art, only while
         // the row is hovered -- the row was already fully clickable, this
-        // just makes that obvious at a glance. Plain Unicode (not an
-        // icon-font codepoint): an earlier attempt at a Font Awesome glyph
-        // here silently ended up as a genuinely empty string (confirmed via
-        // a byte-level file dump, not just a rendering guess), so this uses
-        // characters that don't depend on any particular icon font's
-        // coverage.
+        // just makes that obvious at a glance.
         Rectangle {
           visible: cardMouse.containsMouse
           anchors.centerIn: gameArt
@@ -1795,6 +1790,7 @@ BarWidget {
             anchors.horizontalCenterOffset: 1
             text: cardRoot.hoverGlyph
             color: "white"
+            font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
           }
         }
@@ -1845,19 +1841,22 @@ BarWidget {
       // Row 3: achievement progress -- trophy left, bar expanded to fill
       // the row, numbers on the right. Steam's own local achievement-stat
       // cache, not the Web API -- see scripts/steam-achievements.py.
-      // Omitted entirely for a game Steam hasn't fetched stats for yet AND
-      // whose store page doesn't positively rule achievements out either
-      // (genuinely unknown); a game confirmed (locally, or via the store's
-      // own category tag as a fallback for a game with no local cache at
-      // all) to have no achievements shows "No achievements" instead of a
-      // 0/0 bar.
+      // Three real states once a game's own store fetch has completed
+      // (descriptionLoaded): a real progress bar (local stat cache exists),
+      // "No achievements" (the store's own category tag rules them out
+      // entirely), or "Not yet played" (the store confirms the game *has*
+      // achievements, but there's no local unlock data at all -- common for
+      // an owned-but-never-launched not-installed game, which has no way to
+      // get a local stat cache yet). Omitted entirely only while genuinely
+      // still pending (the store fetch for this game hasn't completed yet).
       Item {
         id: achievementRow
-        visible: cardRoot.game.achievementsLoaded || cardRoot.game.achievementsStoreNone
+        visible: cardRoot.game.achievementsLoaded || cardRoot.game.achievementsStoreNone || cardRoot.game.descriptionLoaded
         width: parent.width
         implicitHeight: Style.space(20)
 
         readonly property bool hasAchievements: cardRoot.game.achievementsTotal > 0
+        readonly property bool notYetPlayed: !hasAchievements && !cardRoot.game.achievementsStoreNone && cardRoot.game.descriptionLoaded
         readonly property real fraction: hasAchievements
           ? cardRoot.game.achievementsUnlocked / cardRoot.game.achievementsTotal
           : 0
@@ -1873,12 +1872,25 @@ BarWidget {
         }
 
         Text {
-          visible: !achievementRow.hasAchievements
+          visible: !achievementRow.hasAchievements && !achievementRow.notYetPlayed
           textFormat: Text.PlainText
           anchors.left: trophyIcon.right
           anchors.leftMargin: Style.space(8)
           anchors.verticalCenter: parent.verticalCenter
           text: "No achievements"
+          color: Qt.darker(root.foreground, 1.5)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.italic: true
+        }
+
+        Text {
+          visible: achievementRow.notYetPlayed
+          textFormat: Text.PlainText
+          anchors.left: trophyIcon.right
+          anchors.leftMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Not yet played"
           color: Qt.darker(root.foreground, 1.5)
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

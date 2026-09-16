@@ -34,8 +34,10 @@ login, nothing sent anywhere except to Steam's own public CDN/store API for art 
 - **Achievement progress** is read from Steam's own local achievement-stat cache — a real bar
   once Steam has cached stats for a game (typically after playing it or viewing its
   achievements page), an italic "No achievements" for a game confirmed to have none (either
-  locally, or via the store's own category tag for a game with no local cache at all), and
-  nothing shown for a game that's genuinely unknown either way.
+  locally, or via the store's own category tag for a game with no local cache at all), an
+  italic "Not yet played" for a game the store confirms *does* have achievements but has no
+  local stat cache yet (common for an owned-but-never-launched game), and nothing shown for a
+  game that's genuinely unknown either way (the store fetch for it hasn't completed yet).
 - **The "Not installed" tab** renders with the exact same card as an installed game — box
   art, description, tags, achievement progress, playtime — just with an Install button
   (`steam://install/<appid>`, which just asks Steam's own client to handle the download —
@@ -123,9 +125,9 @@ omarchy plugin remove io.github.alanone.steam-launcher
 - **Box art missing for one game**: not every game has the taller CDN image; this plugin
   falls back automatically, and leaves the slot blank rather than showing a broken image if
   neither exists.
-- **No achievement bar for a game that has achievements**: Steam only writes its local stat
-  cache after you've opened that game's achievements page or played it at least once — play
-  it or check its achievements in Steam once, then reopen the popup.
+- **A game shows "Not yet played" instead of a progress bar**: Steam only writes its local
+  stat cache after you've opened that game's achievements page or played it at least once —
+  play it or check its achievements in Steam once, then reopen the popup.
 - **A change (new install, new achievement) doesn't show up immediately**: the popup shows
   whatever was loaded by the last background scan, not a live view — reopening it a few
   minutes later, or after actually using the game in question, should pick it up (see "How it
