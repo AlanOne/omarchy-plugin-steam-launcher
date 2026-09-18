@@ -917,6 +917,23 @@ BarWidget {
     return root.boxArtCacheDir + "/" + appid + ".jpg"
   }
 
+  // Resolved paths, keyed by appid -- lives on root, not on the card, so it
+  // survives a SteamGameCard being destroyed and recreated (the not-
+  // installed ListView rebuilds every delegate from scratch on every
+  // steamNotInstalled reassignment, see setSteamNotInstalledField's own
+  // comment). Without this, a re-realized card for an appid whose art was
+  // already fetched moments earlier would still re-run fetch-boxart.sh (a
+  // real process spawn, however fast) before boxArtLocalPath is set again,
+  // blanking the Image for a frame or more each time -- confirmed as the
+  // cause of the box art flickering for a second or two right after opening
+  // the Not Installed tab, while several games' descriptions/tags/
+  // achievement flags are still streaming in and each one's arrival
+  // reassigns the whole list. In-memory only, not persisted -- resets on
+  // shell restart, which is fine, it's just a same-session shortcut around
+  // the delegate-rebuild churn, not a real cache (fetch-boxart.sh's own
+  // on-disk cache is the real one).
+  property var boxArtResolvedPaths: ({})
+
   FileView {
     id: descriptionCacheFile
     path: root.cacheDir + "/steam-descriptions.json"
@@ -1699,7 +1716,8 @@ BarWidget {
     readonly property bool isRunning: root.isGameRunning(cardRoot.game.stateFlags)
     readonly property bool isUpdating: root.isGameUpdating(cardRoot.game.stateFlags)
 
-    // Set once boxArtFetchProc finishes successfully; empty means "nothing
+    // Set once resolved (either immediately from root.boxArtResolvedPaths,
+    // or once boxArtFetchProc finishes successfully); empty means "nothing
     // to show yet" (still fetching, or both the primary and fallback CDN
     // URLs failed/exceeded the bounds in fetch-boxart.sh). See that script
     // for why this goes through a bounded local download instead of handing
@@ -1709,11 +1727,24 @@ BarWidget {
     Process {
       id: boxArtFetchProc
       onExited: function(exitCode) {
-        if (exitCode === 0) cardRoot.boxArtLocalPath = root.boxArtCachePath(cardRoot.game.appid)
+        if (exitCode === 0) {
+          var path = root.boxArtCachePath(cardRoot.game.appid)
+          cardRoot.boxArtLocalPath = path
+          root.boxArtResolvedPaths[cardRoot.game.appid] = path
+        }
       }
     }
 
     Component.onCompleted: {
+      // Already resolved earlier this session (e.g. this exact card just
+      // got destroyed and recreated by a ListView rebuild) -- set
+      // synchronously, no process spawn, no blank frame. See
+      // root.boxArtResolvedPaths' own comment for why this cache exists.
+      var known = root.boxArtResolvedPaths[cardRoot.game.appid]
+      if (known) {
+        cardRoot.boxArtLocalPath = known
+        return
+      }
       boxArtFetchProc.command = ["bash", root.boxArtScriptPath,
         root.boxArtCachePath(cardRoot.game.appid), cardRoot.game.boxArt, cardRoot.game.boxArtFallback]
       boxArtFetchProc.running = true
