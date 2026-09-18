@@ -904,6 +904,19 @@ BarWidget {
   // twice before this was found and fixed.
   readonly property string cacheDir: Quickshell.env("HOME") + "/.cache/omarchy-steam-launcher"
 
+  // Box art is downloaded through scripts/fetch-boxart.sh (bounded time +
+  // size, see its own header comment) into this dir rather than handed
+  // straight to Image.source as a remote URL -- security fix for
+  // marketplace issue #7151. Lives under ~/.cache like the rest of this
+  // plugin's caches, never inside the plugin's own config dir (see the
+  // hot-reload-storm comment above this property).
+  readonly property string boxArtCacheDir: root.cacheDir + "/boxart"
+  readonly property string boxArtScriptPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.alanone.steam-launcher/scripts/fetch-boxart.sh"
+
+  function boxArtCachePath(appid) {
+    return root.boxArtCacheDir + "/" + appid + ".jpg"
+  }
+
   FileView {
     id: descriptionCacheFile
     path: root.cacheDir + "/steam-descriptions.json"
@@ -1686,6 +1699,26 @@ BarWidget {
     readonly property bool isRunning: root.isGameRunning(cardRoot.game.stateFlags)
     readonly property bool isUpdating: root.isGameUpdating(cardRoot.game.stateFlags)
 
+    // Set once boxArtFetchProc finishes successfully; empty means "nothing
+    // to show yet" (still fetching, or both the primary and fallback CDN
+    // URLs failed/exceeded the bounds in fetch-boxart.sh). See that script
+    // for why this goes through a bounded local download instead of handing
+    // the remote URL straight to Image.source.
+    property string boxArtLocalPath: ""
+
+    Process {
+      id: boxArtFetchProc
+      onExited: function(exitCode) {
+        if (exitCode === 0) cardRoot.boxArtLocalPath = root.boxArtCachePath(cardRoot.game.appid)
+      }
+    }
+
+    Component.onCompleted: {
+      boxArtFetchProc.command = ["bash", root.boxArtScriptPath,
+        root.boxArtCachePath(cardRoot.game.appid), cardRoot.game.boxArt, cardRoot.game.boxArtFallback]
+      boxArtFetchProc.running = true
+    }
+
     Rectangle {
       anchors.fill: parent
       radius: Math.max(2, Style.cornerRadius)
@@ -1761,7 +1794,6 @@ BarWidget {
           id: gameArt
           // See the description/tags anchors below for why they pin to
           // this Image's own top/bottom rather than the row's.
-          property bool triedFallback: false
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
           width: Style.space(44)
@@ -1770,13 +1802,10 @@ BarWidget {
           asynchronous: true
           sourceSize.width: width * Screen.devicePixelRatio
           sourceSize.height: height * Screen.devicePixelRatio
-          source: cardRoot.game.boxArt
-          onStatusChanged: {
-            if (status === Image.Error && !triedFallback) {
-              triedFallback = true
-              source = cardRoot.game.boxArtFallback
-            }
-          }
+          // Blank until boxArtFetchProc lands a bounded local file (primary
+          // CDN URL, then fallback, tried inside fetch-boxart.sh) -- never a
+          // remote URL directly, see cardRoot.boxArtLocalPath's own comment.
+          source: cardRoot.boxArtLocalPath !== "" ? ("file://" + cardRoot.boxArtLocalPath) : ""
         }
 
         // Subtle hover affordance: a glyph centered on the art, only while
