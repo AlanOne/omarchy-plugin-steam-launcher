@@ -69,8 +69,10 @@ recolor this," which this plugin's icon-tinting also recognizes.
 
 - **Steam**, installed and already handling `steam://` URIs (true by default on any
   standard Steam-for-Linux install).
-- **`curl`** and **`python3`** — used for the description fetch and local VDF/binary parsing.
-  Both present by default on Omarchy.
+- **`curl`**, **`python3`**, and **ImageMagick** (`magick`) — `curl` for the description/box-art
+  fetch, `python3` for local VDF/binary parsing, and ImageMagick to validate and re-encode
+  downloaded box art before it's ever cached or rendered (see Security below). All three ship
+  in Omarchy's base package set by default.
 
 ## Install
 
@@ -106,10 +108,17 @@ omarchy plugin remove io.github.alanone.steam-launcher
 
 ## Security
 
-- Runs three external processes: `xdg-open` (for `steam://` URIs), `curl` (Steam's public
-  store API), and `python3` (local file parsing). Nothing else.
+- Runs four external processes: `xdg-open` (for `steam://` URIs), `curl` (Steam's public store
+  API and CDN), `python3` (local file parsing), and `magick` (box art validation, see below).
+  Nothing else.
 - The only network calls are to Steam's own CDN and store API — both public, keyless,
   read-only. No credentials are used or stored anywhere.
+- Box art is never handed to the UI as a remote URL or as a raw download. `curl` fetches it
+  under a byte cap and timeout into a temp file; `scripts/fetch-boxart.sh` then re-encodes that
+  file through ImageMagick under a hard pixel-cache/memory ceiling, rejecting anything that
+  isn't a plain JPEG/PNG, exceeds a fixed dimension ceiling, or can't be decoded within that
+  ceiling. Only the resulting local, re-encoded file is ever rendered — a compromised or
+  malicious CDN response can't hand the shell an oversized or malformed image to decode.
 - Reads local files that are already entirely yours (`appmanifest_*.acf`, `localconfig.vdf`,
   the achievement stat cache, `appinfo.vdf`) — used only to build what's shown in the popup,
   never sent anywhere.
@@ -124,7 +133,8 @@ omarchy plugin remove io.github.alanone.steam-launcher
   under heavy use — it'll pick up the description next time the cache entry is due to refresh.
 - **Box art missing for one game**: not every game has the taller CDN image; this plugin
   falls back automatically, and leaves the slot blank rather than showing a broken image if
-  neither exists.
+  neither exists (or if ImageMagick isn't installed, or rejects what it downloaded — see
+  Security above).
 - **A game shows "Not yet played" instead of a progress bar**: Steam only writes its local
   stat cache after you've opened that game's achievements page or played it at least once —
   play it or check its achievements in Steam once, then reopen the popup.

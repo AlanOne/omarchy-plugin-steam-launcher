@@ -910,7 +910,16 @@ BarWidget {
   // marketplace issue #7151. Lives under ~/.cache like the rest of this
   // plugin's caches, never inside the plugin's own config dir (see the
   // hot-reload-storm comment above this property).
-  readonly property string boxArtCacheDir: root.cacheDir + "/boxart"
+  //
+  // "-v2": an install from before fetch-boxart.sh validated/re-encoded
+  // downloads (dimension ceiling + bounded ImageMagick decode) may still
+  // have an old, unvalidated file cached under the v1 path. fetch-boxart.sh
+  // trusts any non-empty file in its cache dir indefinitely, so reusing
+  // that path would mean trusting a file this fix never actually checked.
+  // A versioned dir name sidesteps that without needing to distinguish
+  // old/new cache files by content -- every file under -v2 was written by
+  // the current, validating script.
+  readonly property string boxArtCacheDir: root.cacheDir + "/boxart-v2"
   readonly property string boxArtScriptPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.alanone.steam-launcher/scripts/fetch-boxart.sh"
 
   function boxArtCachePath(appid) {
