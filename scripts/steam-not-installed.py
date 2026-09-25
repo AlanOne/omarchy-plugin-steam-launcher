@@ -8,7 +8,8 @@ sorted by name. Two local, keyless Steam caches, no network:
   point", built up over years of purchases. Same plaintext VDF format
   scripts/steam-last-played.py already parses (a fresh, self-contained
   copy of that parser lives below -- these scripts are meant to run
-  standalone via `python3 <script>`, not import each other).
+  standalone via `python3 <script>`; the one shared piece is
+  steam_libraries.py, which lists every Steam library folder).
 - ~/.local/share/Steam/appcache/appinfo.vdf carries a name (and type, so
   DLC/Tool/Config/Demo/etc. entries can be excluded, leaving actual games)
   for most apps Steam has ever loaded metadata for. This is a genuinely
@@ -46,6 +47,10 @@ import glob
 import os
 import re
 import struct
+import sys
+
+sys.dont_write_bytecode = True  # keep the plugin checkout clean (no __pycache__)
+from steam_libraries import library_dirs  # noqa: E402
 
 # ---- appinfo.vdf (binary, string-table-indexed keys) ----
 
@@ -231,11 +236,8 @@ def owned_appids():
 
 def installed_appids():
     ids = set()
-    for pattern in (
-        "~/.local/share/Steam/steamapps/appmanifest_*.acf",
-        "~/.steam/steam/steamapps/appmanifest_*.acf",
-    ):
-        for path in glob.glob(os.path.expanduser(pattern)):
+    for lib in library_dirs():
+        for path in glob.glob(os.path.join(glob.escape(lib), "steamapps", "appmanifest_*.acf")):
             name = os.path.basename(path)
             ids.add(name[len("appmanifest_"):-len(".acf")])
     return ids

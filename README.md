@@ -22,8 +22,10 @@ box art at all. This plugin gives left-click something worth doing instead: a re
 Everything here is a local file read or a free, keyless request — no Steam Web API key, no
 login, nothing sent anywhere except to Steam's own public CDN/store API for art and blurbs.
 
-- **Installed games** come from `~/.local/share/Steam/steamapps/appmanifest_*.acf` (filtered
-  to drop Proton/runtime/SteamVR compatibility entries that live in the same folder).
+- **Installed games** come from `appmanifest_*.acf` in every Steam library folder — the
+  default one under `~/.local/share/Steam` plus every library Steam lists in its own
+  `steamapps/libraryfolders.vdf` (a second drive, a `/mnt` mount, ...) — filtered to drop
+  Proton/runtime/SteamVR compatibility entries that live in the same folders.
 - **Last-played, playtime, and "Playing now"/"Updating…" status** come from Steam's own
   `localconfig.vdf` and each game's `StateFlags` bitmask — both already-local, already-yours
   data Steam maintains itself. A running game always sorts to the top.
@@ -94,6 +96,18 @@ omarchy plugin add https://github.com/AlanOne/omarchy-plugin-steam-launcher.git 
   list. The icon itself falls back the same way: Steam's real icon while running, the same
   file read directly from disk while closed, a plain glyph if Steam isn't installed at all.
 
+### Settings
+
+Optional, on the widget's entry in `~/.config/omarchy/shell.json` (hot-reloads on save):
+
+```json
+{ "id": "io.github.alanone.steam-launcher", "libraryPaths": ["/mnt/games/SteamLibrary"] }
+```
+
+- **`libraryPaths`** — extra Steam library folders (the folder that *contains*
+  `steamapps/`) to scan on top of the ones Steam already lists in `libraryfolders.vdf`.
+  Array or colon-separated string. Only needed for libraries Steam itself doesn't know about.
+
 Move the widget's position in the bar:
 
 ```sh
@@ -127,6 +141,9 @@ omarchy plugin remove io.github.alanone.steam-launcher
 
 ## Troubleshooting
 
+- **Games installed on another drive are missing**: the plugin reads every library listed in
+  Steam's `libraryfolders.vdf` automatically; if a library still isn't picked up, add it via
+  the `libraryPaths` setting above (see Settings).
 - **Icon never appears**: it's always visible regardless of Steam's state, so this points at
   the plugin itself — check `omarchy restart shell` output for errors.
 - **A game shows "No description available."**: Steam's store API occasionally rate-limits
