@@ -11,11 +11,19 @@
 # Read fresh on every popup open (same rescan as the rest of this file), so
 # "is this game running / updating right now" reflects Steam's own live
 # state without a separate polling mechanism.
+#
+# Covers every Steam library folder (see steam_libraries.py), not just the
+# default one under ~/.local/share/Steam.
 
 shopt -s nullglob
 declare -A seen
 
-for f in "$HOME"/.local/share/Steam/steamapps/appmanifest_*.acf "$HOME"/.steam/steam/steamapps/appmanifest_*.acf; do
+manifests=()
+while IFS= read -r lib; do
+  manifests+=("$lib"/steamapps/appmanifest_*.acf)
+done < <(python3 -B "$(dirname "$0")/steam_libraries.py")
+
+for f in "${manifests[@]}"; do
   appid=$(grep -m1 '"appid"' "$f" | grep -oE '[0-9]+' | head -1)
   [[ -n "$appid" && -z ${seen[$appid]+_} ]] || continue
   seen[$appid]=1

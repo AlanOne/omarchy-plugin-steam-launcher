@@ -80,6 +80,26 @@ BarWidget {
   }
 
   property bool trayMenuOpen: false
+
+  // Optional `libraryPaths` setting on this widget's entry in
+  // ~/.config/omarchy/shell.json -- extra Steam library folders (the folder
+  // that *contains* steamapps/) to scan on top of the ones Steam lists in its
+  // own libraryfolders.vdf. Accepts an array or a colon-separated string:
+  //   { "id": "io.github.alanone.steam-launcher", "libraryPaths": ["/mnt/games/SteamLibrary"] }
+  // Handed to the scripts as STEAM_LAUNCHER_LIBRARY_PATHS (see
+  // scripts/steam_libraries.py).
+  readonly property string scriptsDir: Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.alanone.steam-launcher/scripts"
+  readonly property string extraLibraryPaths: {
+    var value = settings ? settings.libraryPaths : undefined
+    if (value === undefined || value === null) return ""
+    var list = Array.isArray(value) ? value : String(value).split(":")
+    return list.map(function(p) { return String(p).trim() }).filter(function(p) { return p !== "" }).join(":")
+  }
+  readonly property var steamScriptEnvironment: ({ STEAM_LAUNCHER_LIBRARY_PATHS: root.extraLibraryPaths })
+  onExtraLibraryPathsChanged: {
+    steamNotInstalledLoaded = false
+    checkSteamDataForChanges()
+  }
   property var activeTrayItem: null
   property var activeTrayAnchor: null
 
@@ -123,8 +143,13 @@ BarWidget {
     // and the achievement stat cache dir (new achievement data). A changed
     // signature means "worth paying for a real rescan"; an unchanged one
     // means the expensive parsing below can be skipped entirely.
+    // Every library folder's steamapps dir counts, not just the default one,
+    // and each path is part of the signature so adding/removing a library
+    // (in Steam or via the libraryPaths setting) also triggers a rescan.
     command: ["bash", "-c",
-      "for p in \"$HOME/.local/share/Steam/steamapps\" \"$HOME/.local/share/Steam/appcache/stats\" \"$HOME\"/.local/share/Steam/userdata/*/config/localconfig.vdf; do stat -c '%Y' \"$p\" 2>/dev/null; done | tr '\\n' ','"]
+      "{ python3 -B \"$1/steam_libraries.py\" | sed 's|$|/steamapps|'; printf '%s\\n' \"$HOME/.local/share/Steam/appcache/stats\" \"$HOME\"/.local/share/Steam/userdata/*/config/localconfig.vdf; } | while IFS= read -r p; do printf '%s:%s,' \"$p\" \"$(stat -c '%Y' \"$p\" 2>/dev/null)\"; done",
+      "bash", root.scriptsDir]
+    environment: root.steamScriptEnvironment
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.onSteamDataSignature(text)
@@ -427,7 +452,10 @@ BarWidget {
     // order the original scan produced. An old on-disk cache in that
     // shape just reads as stale here (Array.isArray fails) and triggers
     // one fresh full scan, which writes it back in the new shape.
-    if (ageSec >= 0 && ageSec < root.steamNotInstalledCacheMaxAgeSec && Array.isArray(cache.games)) {
+    // A cache written with a different libraryPaths setting was computed
+    // against a different set of installed games -- treat it as stale.
+    var sameLibraries = cache && (cache.libraryPaths || "") === root.extraLibraryPaths
+    if (ageSec >= 0 && ageSec < root.steamNotInstalledCacheMaxAgeSec && sameLibraries && Array.isArray(cache.games)) {
       var games = cache.games.map(function(g) {
         return {
           appid: g.appid,
@@ -469,7 +497,7 @@ BarWidget {
         achievementsLoaded: g.achievementsLoaded
       }
     })
-    var cache = { generatedAt: Math.floor(Date.now() / 1000), games: list }
+    var cache = { generatedAt: Math.floor(Date.now() / 1000), libraryPaths: root.extraLibraryPaths, games: list }
     root.steamNotInstalledCache = cache
     notInstalledCacheFile.setText(JSON.stringify(cache))
   }
@@ -954,7 +982,10 @@ BarWidget {
 
   FileView {
     id: notInstalledCacheFile
-    path: root.cacheDir + "/not-installed.json"
+    // -v2: caches written before library-folder support only knew about the
+    // default library, so they list games installed elsewhere as "not
+    // installed" -- never trust them (same idea as boxart-v2).
+    path: root.cacheDir + "/not-installed-v2.json"
     atomicWrites: true
     printErrors: false
     onLoaded: root.onNotInstalledCacheLoaded(text())
@@ -963,6 +994,7 @@ BarWidget {
 
   Process {
     id: steamListProc
+    environment: root.steamScriptEnvironment
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.onSteamGamesListed(text)
@@ -987,6 +1019,7 @@ BarWidget {
 
   Process {
     id: steamNotInstalledProc
+    environment: root.steamScriptEnvironment
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.onSteamNotInstalledListed(text)
