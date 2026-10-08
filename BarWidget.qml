@@ -294,6 +294,15 @@ BarWidget {
     settleMenuLevel()
   }
 
+  // open/close/opened are what the shell looks for to route a hotkey here:
+  //   omarchy-shell shell toggle io.github.alanone.steam-launcher
+  // acts on the copy of this widget on the focused monitor.
+  readonly property bool opened: steamPopupOpen
+
+  function open() {
+    openSteamLauncher(root)
+  }
+
   function close() {
     trayMenuOpen = false
     steamPopupOpen = false

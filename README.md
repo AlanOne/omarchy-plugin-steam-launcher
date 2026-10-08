@@ -89,6 +89,12 @@ omarchy plugin add https://github.com/AlanOne/omarchy-plugin-steam-launcher.git 
 - **Right-click** gives Steam's own native context menu (Store, Library, Friends, Settings,
   Exit, etc.) — only available while Steam is actually running.
 - **Middle-click** forwards to Steam's own `SecondaryActivate`, same caveat.
+- **Hotkey:** the launcher can be toggled from a keybinding, opening on the focused monitor.
+  In `~/.config/hypr/bindings.lua`:
+
+  ```lua
+  o.bind("SUPER + CTRL + G", "Steam launcher", "omarchy-shell shell toggle io.github.alanone.steam-launcher")
+  ```
 - The icon is always visible. Everything works the same whether Steam is running or closed;
   only when Steam isn't *installed* does the popup show that explicitly instead of a games
   list. The icon itself falls back the same way: Steam's real icon while running, the same
