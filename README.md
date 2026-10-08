@@ -86,6 +86,10 @@ omarchy plugin add https://github.com/AlanOne/omarchy-plugin-steam-launcher.git 
   installed** tabs sit below the title row; clicking a tab switches the list and re-scopes
   the search box to it. Click any installed game to launch it, or click Install on an
   uninstalled one. The list shows up to 8 rows before scrolling.
+- **Keyboard:** the search box has focus as soon as the popup opens. Type to filter, then
+  **Enter** launches the top match (or installs it, on the Not installed tab). **Up/Down**
+  (also Ctrl+N/P and Ctrl+J/K) and **PgUp/PgDn** move the selection, **Tab** switches tabs,
+  and **Esc** closes the popup.
 - **Right-click** gives Steam's own native context menu (Store, Library, Friends, Settings,
   Exit, etc.) — only available while Steam is actually running.
 - **Middle-click** forwards to Steam's own `SecondaryActivate`, same caveat.

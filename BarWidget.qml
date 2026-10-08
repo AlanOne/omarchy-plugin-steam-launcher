@@ -165,6 +165,64 @@ BarWidget {
     return steamNotInstalled.filter(function(g) { return g.name.toLowerCase().indexOf(q) !== -1 })
   }
 
+  // Keyboard selection within the active tab's filtered list. Enter acts on
+  // it, and it starts on the top row, so typing a name and pressing Enter
+  // launches the best match. The highlight only shows once the keyboard is
+  // actually in use (a search typed or an arrow pressed), so mouse-only use
+  // never shows a stray selected row competing with the hover highlight.
+  property int steamSelectedIndex: 0
+  property bool steamKeyboardActive: false
+  readonly property var steamActiveList: steamActiveTab === "installed" ? filteredSteamGames : filteredSteamNotInstalled
+
+  onSteamSearchQueryChanged: {
+    steamKeyboardActive = steamSearchQuery.trim() !== ""
+    steamSelectedIndex = 0
+    Qt.callLater(scrollSteamSelectionIntoView)
+  }
+  onSteamActiveTabChanged: {
+    steamSelectedIndex = 0
+    Qt.callLater(scrollSteamSelectionIntoView)
+  }
+
+  function moveSteamSelection(delta) {
+    var count = steamActiveList.length
+    if (count === 0) return
+    steamKeyboardActive = true
+    steamSelectedIndex = Math.max(0, Math.min(count - 1, steamSelectedIndex + delta))
+    scrollSteamSelectionIntoView()
+  }
+
+  function activateSteamSelection() {
+    var game = steamActiveList[steamSelectedIndex]
+    if (!game) return
+    if (steamActiveTab === "installed") launchSteamApp(game.appid)
+    else installSteamApp(game.appid)
+  }
+
+  function cycleSteamTab() {
+    switchSteamTab(steamActiveTab === "installed" ? "notinstalled" : "installed")
+  }
+
+  // The installed list is a Repeater inside the popup's own Flickable, so
+  // scrolling means moving that Flickable; the not-installed list is a
+  // ListView with its own scroll (see its comment for why) and can position
+  // itself. Back at the top row, the outer Flickable returns to the top too
+  // so the search box comes back into view.
+  function scrollSteamSelectionIntoView() {
+    if (steamSelectedIndex === 0) steamLauncherFlick.contentY = 0
+    if (steamActiveTab === "notinstalled") {
+      notInstalledListView.positionViewAtIndex(steamSelectedIndex, ListView.Contain)
+      return
+    }
+    var card = installedGamesRepeater.itemAt(steamSelectedIndex)
+    if (!card || steamSelectedIndex === 0) return
+    var maxY = Math.max(0, steamLauncherFlick.contentHeight - steamLauncherFlick.height)
+    if (card.y < steamLauncherFlick.contentY)
+      steamLauncherFlick.contentY = card.y
+    else if (card.y + card.height > steamLauncherFlick.contentY + steamLauncherFlick.height)
+      steamLauncherFlick.contentY = Math.min(maxY, card.y + card.height - steamLauncherFlick.height)
+  }
+
   // Disk usage always reflects the full install list, not the filtered one
   // -- "how much disk am I using" shouldn't change just because a search is
   // active.
@@ -312,6 +370,8 @@ BarWidget {
     steamPopupAnchor = anchorItem
     steamPopupOpen = true
     steamActiveTab = "installed"
+    steamSelectedIndex = 0
+    steamKeyboardActive = steamSearchQuery.trim() !== ""
     // Bootstrap only: the background timer (steamChangeCheckTimer) plus its
     // cheap mtime-based change detection keeps this fresh without a rescan
     // tied to the act of opening -- this just covers the very first open of
@@ -1575,6 +1635,31 @@ BarWidget {
           font.family: root.fontFamily
           text: root.steamSearchQuery
           onTextChanged: root.steamSearchQuery = text
+
+          // List navigation lives on the field itself, since it holds focus
+          // the whole time the popup is open. A PanelKeyCatcher would also
+          // claim plain j/k, which then couldn't be typed into the search.
+          Keys.onPressed: function(event) {
+            var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
+            var page = steamLauncherPopup.steamVisibleRows
+            if (event.key === Qt.Key_Down || (ctrl && (event.key === Qt.Key_N || event.key === Qt.Key_J)))
+              root.moveSteamSelection(1)
+            else if (event.key === Qt.Key_Up || (ctrl && (event.key === Qt.Key_P || event.key === Qt.Key_K)))
+              root.moveSteamSelection(-1)
+            else if (event.key === Qt.Key_PageDown)
+              root.moveSteamSelection(page)
+            else if (event.key === Qt.Key_PageUp)
+              root.moveSteamSelection(-page)
+            else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+              root.activateSteamSelection()
+            else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab)
+              root.cycleSteamTab()
+            else if (event.key === Qt.Key_Escape)
+              root.close()
+            else
+              return
+            event.accepted = true
+          }
         }
 
         Text {
@@ -1607,13 +1692,16 @@ BarWidget {
         }
 
         Repeater {
+          id: installedGamesRepeater
           // Zero delegates while the other tab is active, not just hidden
           // ones -- same reasoning as the not-installed Repeater below.
           model: root.steamActiveTab === "installed" ? root.filteredSteamGames : []
 
           delegate: SteamGameCard {
             required property var modelData
+            required property int index
             game: modelData
+            selected: root.steamKeyboardActive && index === root.steamSelectedIndex
             actionTooltip: "Launch"
             hoverGlyph: "▶"
             onActivated: root.launchSteamApp(modelData.appid)
@@ -1685,7 +1773,9 @@ BarWidget {
 
           delegate: SteamGameCard {
             required property var modelData
+            required property int index
             game: modelData
+            selected: root.steamKeyboardActive && index === root.steamSelectedIndex
             actionTooltip: "Install"
             hoverGlyph: ""
             showActionButton: true
@@ -1717,6 +1807,9 @@ BarWidget {
     // the hover glyph alone wasn't a discoverable enough affordance for a
     // less familiar action like installing an owned-but-uninstalled game.
     property bool showActionButton: false
+    // Keyboard selection: drawn like a hover, plus an outline so it stays
+    // distinguishable when the mouse is resting over a different row.
+    property bool selected: false
     signal activated()
 
     width: steamLauncherColumn.width
@@ -1762,7 +1855,9 @@ BarWidget {
     Rectangle {
       anchors.fill: parent
       radius: Math.max(2, Style.cornerRadius)
-      color: cardMouse.containsMouse ? Style.hoverFillFor(root.foreground, root.foreground) : "transparent"
+      color: cardMouse.containsMouse || cardRoot.selected ? Style.hoverFillFor(root.foreground, root.foreground) : "transparent"
+      border.width: cardRoot.selected ? Math.max(1, Style.space(1)) : 0
+      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
     }
 
     Column {
@@ -1852,7 +1947,7 @@ BarWidget {
         // the row is hovered -- the row was already fully clickable, this
         // just makes that obvious at a glance.
         Rectangle {
-          visible: cardMouse.containsMouse
+          visible: cardMouse.containsMouse || cardRoot.selected
           anchors.centerIn: gameArt
           width: Style.space(22)
           height: width
